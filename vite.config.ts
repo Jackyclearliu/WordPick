@@ -28,5 +28,9 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    watch: {
+      // Rust 构建产物目录：文件多且 .exe 写入时会被 Windows 锁定（EBUSY），必须排除
+      ignored: ['**/src-tauri/target/**', '**/src-tauri/gen/**', '**/node_modules/**', '**/dist/**'],
+    },
   },
 })
