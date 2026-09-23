@@ -171,7 +171,8 @@ fn register_shortcuts(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_logger::init();
+    // RUST_LOG 未设置时默认 info（env_logger 静默默认 error，会导致关键日志「看着没输出」）
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
