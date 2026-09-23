@@ -138,6 +138,8 @@ fn place_toolbar(
     anchor: (i32, i32),
     pref: PopupPosition,
 ) {
+    // 先隐藏再移动：复用窗口时位置跳转会以闪现暴露，隐藏-定位-显示保证只呈现最终位置
+    let _ = win.hide();
     position_at(app, win, anchor, pref);
     let _ = win.show();
     let _ = win.set_focus(); // 无焦点工具条需要一次焦点以接收键盘操作（FR-2.4），随后不抢占输入
@@ -171,6 +173,8 @@ fn place_panel(
     anchor: (i32, i32),
     pref: PopupPosition,
 ) {
+    // 先隐藏再移动：位置跳转会以闪现暴露，隐藏-定位-显示只呈现最终位置
+    let _ = win.hide();
     position_at(app, win, anchor, pref);
     let _ = win.show();
 }

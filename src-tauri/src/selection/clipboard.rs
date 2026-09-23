@@ -129,21 +129,22 @@ pub fn simulate_ctrl_c_probe(app: &tauri::AppHandle) -> Option<String> {
         }
     }
 
-    // 读后还原
-    match &previous {
-        Some(prev) => {
-            let _ = app.clipboard().write_text(prev);
+    // 判定：拿到真实复制结果则保留选中文本在剪贴板（与用户自己 Ctrl+C 的语义一致），
+    // **不还原**——无条件还原会覆盖用户在探测窗口内的并发复制（系统 Ctrl+C「失效」的根因）。
+    // 仅当应用未复制（剪贴板仍是哨兵/空）时清除哨兵、还原旧内容。
+    match &after {
+        Some(text) if text != &sentinel && !text.trim().is_empty() => Some(text.clone()),
+        _ => {
+            match &previous {
+                Some(prev) => {
+                    let _ = app.clipboard().write_text(prev);
+                }
+                None => {
+                    let _ = app.clipboard().clear();
+                }
+            }
+            None
         }
-        None => {
-            let _ = app.clipboard().clear();
-        }
-    }
-
-    let text = after?;
-    if text == sentinel || text.trim().is_empty() {
-        None
-    } else {
-        Some(text)
     }
 }
 
@@ -194,23 +195,20 @@ pub fn copy_selection_via_wm_copy(
     }
     let after: Option<String> = app.clipboard().read_text().ok();
 
-    // 读后还原
-    match &previous {
-        Some(prev) => {
-            let _ = app.clipboard().write_text(prev);
-        }
-        None => {
-            let _ = app.clipboard().clear();
-        }
-    }
-
     let text = after?;
-    if text == sentinel {
+    if text == sentinel || text.trim().is_empty() {
+        // 应用未处理 WM_COPY：剪贴板仍是我们的哨兵，清除并还原旧内容
+        match &previous {
+            Some(prev) => {
+                let _ = app.clipboard().write_text(prev);
+            }
+            None => {
+                let _ = app.clipboard().clear();
+            }
+        }
         return None;
     }
-    if text.trim().is_empty() {
-        None
-    } else {
-        Some(text)
-    }
+    // 复制成功：保留选中文本在剪贴板，不还原（与 simulate_ctrl_c_probe 同一策略，
+    // 还原会覆盖用户在探测窗口内的并发复制）
+    Some(text)
 }

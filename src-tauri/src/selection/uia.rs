@@ -198,26 +198,35 @@ fn mouse_state() -> (bool, (i32, i32)) {
 /// （dev 模式下直接杀死本应用，exit 0xc000013a），并可能干扰用户终端内运行的程序。
 fn read_selection_via_ctrl_c(app: &tauri::AppHandle, hwnd: HWND) -> Option<Selection> {
     if is_console_window(hwnd) {
-        // 终端（conhost/Windows Terminal 等）：退回 WM_COPY 哨兵通道（支持选区复制的终端可用）
-        return read_selection(app, hwnd);
+        // 终端（conhost/Windows Terminal 等）：禁止模拟 Ctrl+C（中断转发会杀死附着进程）；
+        // UIA TextPattern 直读优先，个别终端退回 WM_COPY 哨兵（仅拖选释放瞬间一次，非高频）
+        let text = match read_selection_uia(hwnd) {
+            Some(t) => Some(t),
+            None => {
+                log::info!(
+                    "console: UIA selection unavailable (hwnd={:#x}), fallback WM_COPY",
+                    hwnd.0 as usize
+                );
+                clipboard::copy_selection_via_wm_copy(app, hwnd)
+            }
+        }?;
+        return build_selection(text, anchor_for(hwnd));
     }
     let text = clipboard::simulate_ctrl_c_probe(app)?;
     build_selection(text, anchor_for(hwnd))
 }
 
-/// WinEvent 通道（经典应用）：WM_COPY 哨兵取词
-fn read_selection(app: &tauri::AppHandle, hwnd: HWND) -> Option<Selection> {
-    let text = if is_console_window(hwnd) {
-        // 终端：WM_COPY 可能不响应，UIA TextPattern 直读选区优先
-        read_selection_uia(hwnd).or_else(|| clipboard::copy_selection_via_wm_copy(app, hwnd))?
-    } else {
-        clipboard::copy_selection_via_wm_copy(app, hwnd)?
-    };
+/// WinEvent 通道：UIA TextPattern 只读取词。
+/// ⚠️ 事件路径禁用一切剪贴板写入（WM_COPY 哨兵）：TEXTSELECTIONCHANGED 在输入时高频
+/// 触发，「写哨兵→复制→读后还原」会覆盖用户紧随其后的 Ctrl+C 复制（系统复制「失效」）。
+fn read_selection(_app: &tauri::AppHandle, hwnd: HWND) -> Option<Selection> {
+    let text = read_selection_uia(hwnd)?;
     build_selection(text, anchor_for(hwnd))
 }
 
-/// UIA TextPattern 直读选区文本（终端类应用专用：conhost/Windows Terminal 完整支持）。
-/// 不碰剪贴板、不发按键——规避 Ctrl+C 中断转发（0xc000013a）与 WM_COPY 不响应的问题。
+/// UIA TextPattern 直读选区文本（只读，不碰剪贴板、不发按键）。
+/// 适用于终端（conhost/Windows Terminal）、记事本等绝大多数应用；
+/// Chromium 系 UIA 树惰性不可见，返回 None（由拖选释放的 Ctrl+C 通道负责）。
 pub fn read_selection_uia(hwnd: HWND) -> Option<String> {
     use windows::core::Interface;
     use windows::Win32::System::Com::{
@@ -230,8 +239,17 @@ pub fn read_selection_uia(hwnd: HWND) -> Option<String> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED); // 每线程一次；已初始化返回 S_FALSE
         let automation: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_ALL).ok()?;
-        let element = automation.ElementFromHandle(hwnd).ok()?;
-        // 终端hwnd可能嵌套：顶层窗口无 TextPattern 时直接失败返回 None
+        // TextPattern 常在子元素上（如终端的 TermControl、记事本的 Edit）：
+        // 先取事件所属窗口的元素，拿不到 TextPattern 再退回光标下的元素
+        let element = match automation.ElementFromHandle(hwnd) {
+            Ok(el) if el.GetCurrentPattern(UIA_TextPatternId).is_ok() => el,
+            _ => {
+                let (x, y) = clipboard::cursor_pos()?;
+                automation
+                    .ElementFromPoint(windows::Win32::Foundation::POINT { x, y })
+                    .ok()?
+            }
+        };
         let pattern = element
             .GetCurrentPattern(UIA_TextPatternId)
             .ok()?
