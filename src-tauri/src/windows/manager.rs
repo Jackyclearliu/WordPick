@@ -11,11 +11,13 @@ use super::position::{locate, PopupPosition, Rect};
 use super::WindowKind;
 
 /// 纯窗口创建（调用方必须保证不在同步 command / 事件回调线程上）
+/// `pos`：创建即定位。窗口先出现在默认位置 (0,0) 再移动会造成左上角闪现。
 fn build_window(
     app: &tauri::AppHandle,
     label: &str,
     kind: WindowKind,
     url: &str,
+    pos: Option<PhysicalPosition<i32>>,
 ) -> tauri::Result<WebviewWindow> {
     let builder = match kind {
         WindowKind::Toolbar => WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
@@ -37,6 +39,12 @@ fn build_window(
             .decorations(true)
             .inner_size(760.0, 600.0),
     };
+    let builder = match pos {
+        // 构建即定位，避免窗口先落在默认位置 (0,0) 造成左上角闪现；
+        // 此处单位与 place_* 的 PhysicalPosition 修正会随后覆盖（仅消除首帧闪现）
+        Some(p) => builder.position(p.x as f64, p.y as f64),
+        None => builder,
+    };
     builder.build()
 }
 
@@ -49,6 +57,7 @@ pub fn with_window<F>(
     label: &str,
     kind: WindowKind,
     url: &str,
+    pos: Option<PhysicalPosition<i32>>,
     on_created: F,
 ) -> Option<WebviewWindow>
 where
@@ -61,7 +70,7 @@ where
     let label = label.to_string();
     let url = url.to_string();
     tauri::async_runtime::spawn(async move {
-        match build_window(&app, &label, kind, &url) {
+        match build_window(&app, &label, kind, &url, pos) {
             Ok(win) => on_created(&win),
             Err(e) => log::error!("create window '{label}' failed: {e}"),
         }
@@ -77,7 +86,7 @@ pub fn show_window(app: &tauri::AppHandle, label: &str, kind: WindowKind, url: &
             let _ = win.set_focus();
         }
     }
-    let created = with_window(app, label, kind, url, move |w| show(w, kind));
+    let created = with_window(app, label, kind, url, None, move |w| show(w, kind));
     if let Some(win) = created {
         show(&win, kind);
     }
@@ -140,11 +149,13 @@ pub fn show_toolbar_at(app: &tauri::AppHandle, anchor: Option<(i32, i32)>, pref:
         return;
     };
     let app2 = app.clone();
+    let pos = PhysicalPosition::new(anchor.0, anchor.1);
     let created = with_window(
         app,
         "toolbar",
         WindowKind::Toolbar,
         "toolbar.html",
+        Some(pos),
         move |w| {
             place_toolbar(&app2, w, anchor, pref);
         },
@@ -170,9 +181,17 @@ pub fn show_panel(app: &tauri::AppHandle, anchor: Option<(i32, i32)>, pref: Popu
         return;
     };
     let app2 = app.clone();
-    let created = with_window(app, "panel", WindowKind::Panel, "panel.html", move |w| {
-        place_panel(&app2, w, anchor, pref);
-    });
+    let pos = PhysicalPosition::new(anchor.0, anchor.1);
+    let created = with_window(
+        app,
+        "panel",
+        WindowKind::Panel,
+        "panel.html",
+        Some(pos),
+        move |w| {
+            place_panel(&app2, w, anchor, pref);
+        },
+    );
     if let Some(win) = created {
         place_panel(app, &win, anchor, pref);
     }

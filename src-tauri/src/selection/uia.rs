@@ -207,8 +207,63 @@ fn read_selection_via_ctrl_c(app: &tauri::AppHandle, hwnd: HWND) -> Option<Selec
 
 /// WinEvent 通道（经典应用）：WM_COPY 哨兵取词
 fn read_selection(app: &tauri::AppHandle, hwnd: HWND) -> Option<Selection> {
-    let text = clipboard::copy_selection_via_wm_copy(app, hwnd)?;
+    let text = if is_console_window(hwnd) {
+        // 终端：WM_COPY 可能不响应，UIA TextPattern 直读选区优先
+        read_selection_uia(hwnd).or_else(|| clipboard::copy_selection_via_wm_copy(app, hwnd))?
+    } else {
+        clipboard::copy_selection_via_wm_copy(app, hwnd)?
+    };
     build_selection(text, anchor_for(hwnd))
+}
+
+/// UIA TextPattern 直读选区文本（终端类应用专用：conhost/Windows Terminal 完整支持）。
+/// 不碰剪贴板、不发按键——规避 Ctrl+C 中断转发（0xc000013a）与 WM_COPY 不响应的问题。
+pub fn read_selection_uia(hwnd: HWND) -> Option<String> {
+    use windows::core::Interface;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
+    };
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, IUIAutomationTextPattern, UIA_TextPatternId,
+    };
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED); // 每线程一次；已初始化返回 S_FALSE
+        let automation: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_ALL).ok()?;
+        let element = automation.ElementFromHandle(hwnd).ok()?;
+        // 终端hwnd可能嵌套：顶层窗口无 TextPattern 时直接失败返回 None
+        let pattern = element
+            .GetCurrentPattern(UIA_TextPatternId)
+            .ok()?
+            .cast::<IUIAutomationTextPattern>()
+            .ok()?;
+        let ranges = pattern.GetSelection().ok()?;
+        let len = ranges.Length().ok()?;
+        let mut parts: Vec<String> = Vec::new();
+        for i in 0..len {
+            let Ok(range) = ranges.GetElement(i) else {
+                continue;
+            };
+            if let Ok(text) = range.GetText(-1) {
+                let s = String::from_utf16_lossy(text.as_wide());
+                if !s.trim().is_empty() {
+                    parts.push(s);
+                }
+            }
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n"))
+        }
+    }
+}
+
+/// 快捷键通道辅助：直读前台窗口的 UIA 选区（终端里剪贴板常是旧内容，Alt+Q 不应读它）
+#[cfg(windows)]
+pub fn foreground_selection_text() -> Option<String> {
+    let fg = foreground_hwnd()?;
+    read_selection_uia(fg)
 }
 
 fn build_selection(text: String, anchor: Option<(i32, i32)>) -> Option<Selection> {

@@ -141,8 +141,16 @@ fn register_shortcuts(
             if event.state != ShortcutState::Pressed {
                 return;
             }
-            // 快捷键通道：读取剪贴板 → 弹出工具条（FR-1.3 shortcut 模式）
-            if let Some(sel) = selection::clipboard::read_selection_from_clipboard(app) {
+            // 快捷键通道：优先 UIA 直读前台选区（终端里剪贴板常是旧内容）；
+            // 无选区（如 Chromium）退回剪贴板读取（FR-1.3 shortcut 模式）
+            let sel = selection::uia::foreground_selection_text()
+                .map(|text| selection::Selection {
+                    text,
+                    anchor: selection::clipboard::cursor_pos(),
+                    source: selection::SelectionSource::Shortcut,
+                })
+                .or_else(|| selection::clipboard::read_selection_from_clipboard(app));
+            if let Some(sel) = sel {
                 let app2 = app.clone();
                 let st = app2.state::<AppState>();
                 let pref = match st.config.read().general.popup_position.as_str() {
