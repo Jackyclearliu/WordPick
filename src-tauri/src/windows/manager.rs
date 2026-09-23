@@ -1,17 +1,21 @@
 //! 窗口管理器：窗口工厂与复用池（窗口创建开销 < 100ms，NFR 4.1）。
 //! 工具条跟随选区显示/隐藏；对话框按功能会话制复用；设置单实例聚焦。
-use tauri::{Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{Manager, PhysicalPosition, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 use super::position::{locate, PopupPosition, Rect};
 use super::WindowKind;
 
 /// 获取或创建指定窗口（复用池：预创建、隐藏/显示切换）
-pub fn get_or_create<M: Manager>(
+pub fn get_or_create<M, R>(
     app: &M,
     label: &str,
     kind: WindowKind,
     url: &str,
-) -> tauri::Result<WebviewWindow> {
+) -> tauri::Result<WebviewWindow<R>>
+where
+    M: Manager<R>,
+    R: Runtime,
+{
     if let Some(win) = app.get_webview_window(label) {
         return Ok(win);
     }
@@ -39,7 +43,11 @@ pub fn get_or_create<M: Manager>(
 }
 
 /// 显示窗口（已存在则显示并聚焦：设置窗口单实例聚焦，FR-7.3 同类语义）
-pub fn show_window<M: Manager>(app: &M, label: &str, kind: WindowKind, url: &str) {
+pub fn show_window<M, R>(app: &M, label: &str, kind: WindowKind, url: &str)
+where
+    M: Manager<R>,
+    R: Runtime,
+{
     match get_or_create(app, label, kind, url) {
         Ok(win) => {
             let _ = win.show();
@@ -52,11 +60,8 @@ pub fn show_window<M: Manager>(app: &M, label: &str, kind: WindowKind, url: &str
 }
 
 /// 在选区锚点处显示工具条（含定位算法与工作区约束，FR-1.1）
-pub fn show_toolbar_at<M: Manager>(
-    app: &M,
-    anchor: Option<(i32, i32)>,
-    pref: PopupPosition,
-) {
+/// 注意：使用 AppHandle 具体类型——monitor_from_point/primary_monitor 是其固有方法
+pub fn show_toolbar_at(app: &tauri::AppHandle, anchor: Option<(i32, i32)>, pref: PopupPosition) {
     let Some(anchor) = anchor.or_else(crate::selection::clipboard::cursor_pos) else {
         return;
     };
@@ -75,18 +80,25 @@ pub fn show_toolbar_at<M: Manager>(
                 Rect {
                     x: m.position().x,
                     y: m.position().y,
-                    w: m.size().width,
-                    h: m.size().height,
+                    w: m.size().width as i32,
+                    h: m.size().height as i32,
                 },
                 m.scale_factor(),
             )
         })
         .unwrap_or((
-            Rect { x: 0, y: 0, w: 1920, h: 1080 },
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            },
             1.0,
         ));
 
-    let size = win.inner_size().unwrap_or(tauri::PhysicalSize::new(280, 44));
+    let size = win
+        .inner_size()
+        .unwrap_or(tauri::PhysicalSize::new(280, 44));
     let (x, y) = locate(
         anchor,
         (size.width as i32, size.height as i32),
@@ -102,7 +114,11 @@ pub fn show_toolbar_at<M: Manager>(
 }
 
 /// 隐藏工具条（选区取消，FR-1.2）
-pub fn hide_toolbar<M: Manager>(app: &M) {
+pub fn hide_toolbar<M, R>(app: &M)
+where
+    M: Manager<R>,
+    R: Runtime,
+{
     if let Some(win) = app.get_webview_window("toolbar") {
         let _ = win.hide();
     }

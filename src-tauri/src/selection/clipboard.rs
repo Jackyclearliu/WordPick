@@ -17,17 +17,18 @@ pub fn read_selection_from_clipboard(app: &tauri::AppHandle) -> Option<Selection
     })
 }
 
-/// 当前鼠标光标屏幕坐标（各平台）
+/// 当前鼠标光标屏幕坐标（各平台，逻辑像素）
 pub fn cursor_pos() -> Option<(i32, i32)> {
     platform_cursor_pos()
 }
 
 #[cfg(windows)]
 fn platform_cursor_pos() -> Option<(i32, i32)> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetCursorPos, POINT};
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
     let mut pt = POINT { x: 0, y: 0 };
     unsafe {
-        if GetCursorPos(&mut pt).as_bool() {
+        if GetCursorPos(&mut pt).is_ok() {
             Some((pt.x, pt.y))
         } else {
             None
@@ -51,90 +52,24 @@ fn platform_cursor_pos() -> Option<(i32, i32)> {
 }
 
 // ---------------------------------------------------------------------------
-// Windows：WM_COPY 取选中文本 + 剪贴板还原
+// Windows：WM_COPY 取选中文本 + 剪贴板还原（经 Tauri 剪贴板插件，跨 crate 版本安全）
 // ---------------------------------------------------------------------------
 #[cfg(windows)]
-pub fn copy_selection_via_wm_copy(hwnd: windows::Win32::Foundation::HWND) -> Option<String> {
-    use windows::Win32::Foundation::HWND;
+pub fn copy_selection_via_wm_copy(
+    app: &tauri::AppHandle,
+    hwnd: windows::Win32::Foundation::HWND,
+) -> Option<String> {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_COPY};
 
-    let previous = read_clipboard_text();
+    // 仅当原剪贴板为文本时无损还原（图片等内容不覆盖、不写回）
+    let previous: Option<String> = app.clipboard().read_text().ok();
     unsafe {
-        let _ = SendMessageW(hwnd, WM_COPY, WPARAM_UNUSED, LPARAM_UNUSED);
+        SendMessageW(hwnd, WM_COPY, WPARAM(0), LPARAM(0));
     }
-    let selected = read_clipboard_text();
-    // 读后还原（尽力而为：仅当原剪贴板为文本时无损还原）
+    let selected: Option<String> = app.clipboard().read_text().ok();
     if let Some(prev) = previous {
-        write_clipboard_text(&prev);
+        let _ = app.clipboard().write_text(prev);
     }
     selected.filter(|s| !s.trim().is_empty())
-}
-
-#[cfg(windows)]
-const WPARAM_UNUSED: windows::Win32::Foundation::WPARAM =
-    windows::Win32::Foundation::WPARAM(0);
-#[cfg(windows)]
-const LPARAM_UNUSED: windows::Win32::Foundation::LPARAM =
-    windows::Win32::Foundation::LPARAM(0);
-
-/// 读取剪贴板纯文本（非文本内容返回 None）
-#[cfg(windows)]
-fn read_clipboard_text() -> Option<String> {
-    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
-    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
-    use windows::Win32::System::SystemServices::CF_UNICODETEXT;
-
-    unsafe {
-        if !OpenClipboard(None).as_bool() {
-            return None;
-        }
-        let result = (|| {
-            let handle = GetClipboardData(CF_UNICODETEXT.0 as u32)?;
-            let size = GlobalSize(handle);
-            if size == 0 {
-                return None;
-            }
-            let ptr = GlobalLock(handle);
-            if ptr.is_null() {
-                return None;
-            }
-            let wide_len = (size as usize) / 2;
-            let slice = std::slice::from_raw_parts(ptr as *const u16, wide_len);
-            let s = String::from_utf16_lossy(slice);
-            let _ = GlobalUnlock(handle);
-            // 去掉结尾 NUL
-            Some(s.trim_end_matches('\0').to_string())
-        })();
-        let _ = CloseClipboard();
-        result
-    }
-}
-
-/// 写入剪贴板纯文本
-#[cfg(windows)]
-fn write_clipboard_text(text: &str) {
-    use windows::Win32::System::DataExchange::{
-        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
-    };
-    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
-    use windows::Win32::System::SystemServices::CF_UNICODETEXT;
-
-    unsafe {
-        if !OpenClipboard(None).as_bool() {
-            return;
-        }
-        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-        let bytes = wide.len() * 2;
-        let handle = GlobalAlloc(GMEM_MOVEABLE, bytes);
-        if !handle.is_null() {
-            let ptr = GlobalLock(handle);
-            if !ptr.is_null() {
-                std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr as *mut u16, wide.len());
-                let _ = GlobalUnlock(handle);
-            }
-            let _ = EmptyClipboard();
-            let _ = SetClipboardData(CF_UNICODETEXT.0 as u32, handle);
-        }
-        let _ = CloseClipboard();
-    }
 }

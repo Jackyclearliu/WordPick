@@ -30,7 +30,12 @@ pub enum PopupPosition {
 const GAP: i32 = 8;
 
 /// 计算弹窗位置：返回窗口左上角坐标，保证完整落入工作区（尽力而为）
-pub fn locate(anchor: (i32, i32), size: (i32, i32), workarea: Rect, pref: PopupPosition) -> (i32, i32) {
+pub fn locate(
+    anchor: (i32, i32),
+    size: (i32, i32),
+    workarea: Rect,
+    pref: PopupPosition,
+) -> (i32, i32) {
     let (ax, ay) = anchor;
     let (w, h) = size;
 
@@ -70,7 +75,12 @@ pub fn locate(anchor: (i32, i32), size: (i32, i32), workarea: Rect, pref: PopupP
 mod tests {
     use super::*;
 
-    const SCREEN: Rect = Rect { x: 0, y: 0, w: 1920, h: 1080 };
+    const SCREEN: Rect = Rect {
+        x: 0,
+        y: 0,
+        w: 1920,
+        h: 1080,
+    };
 
     #[test]
     fn prefers_below() {
@@ -88,14 +98,24 @@ mod tests {
     #[test]
     fn falls_to_right_when_left_edge() {
         // 锚点贴左缘：下方/上方/左侧均越界 → 右侧
-        let wa = Rect { x: 0, y: 0, w: 400, h: 1080 };
+        let wa = Rect {
+            x: 0,
+            y: 0,
+            w: 400,
+            h: 1080,
+        };
         let pos = locate((10, 540), (300, 200), wa, PopupPosition::Below);
         assert_eq!(pos, (18, 440));
     }
 
     #[test]
     fn clamps_as_last_resort() {
-        let wa = Rect { x: 0, y: 0, w: 200, h: 150 };
+        let wa = Rect {
+            x: 0,
+            y: 0,
+            w: 200,
+            h: 150,
+        };
         let pos = locate((100, 100), (300, 200), wa, PopupPosition::Below);
         assert_eq!(pos, (0, 0));
     }

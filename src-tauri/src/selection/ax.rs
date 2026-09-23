@@ -38,7 +38,9 @@ pub fn frontmost_app_name() -> Option<String> {
         if name == nil {
             return None;
         }
-        Some(cfstring_to_string(name as core_foundation::string::CFStringRef))
+        Some(cfstring_to_string(
+            name as core_foundation::string::CFStringRef,
+        ))
     }
 }
 
@@ -126,11 +128,7 @@ unsafe fn read_selection() -> Option<Selection> {
     // 1) 焦点元素
     let mut focused: core_foundation::base::CFTypeRef = std::ptr::null();
     let attr = CFString::new(kAXFocusedUIElementAttribute);
-    let err = AXUIElementCopyAttributeValue(
-        system_wide,
-        attr.as_concrete_TypeRef(),
-        &mut focused,
-    );
+    let err = AXUIElementCopyAttributeValue(system_wide, attr.as_concrete_TypeRef(), &mut focused);
     if err != kAXErrorSuccess || focused.is_null() {
         return None;
     }
@@ -138,13 +136,17 @@ unsafe fn read_selection() -> Option<Selection> {
     // 2) AXSelectedText
     let attr = CFString::new(kAXSelectedTextAttribute);
     let mut text_ref: core_foundation::base::CFTypeRef = std::ptr::null();
-    if AXUIElementCopyAttributeValue(focused as AXUIElementRef, attr.as_concrete_TypeRef(), &mut text_ref)
-        != kAXErrorSuccess
+    if AXUIElementCopyAttributeValue(
+        focused as AXUIElementRef,
+        attr.as_concrete_TypeRef(),
+        &mut text_ref,
+    ) != kAXErrorSuccess
         || text_ref.is_null()
     {
         return None;
     }
-    let text = CFString::wrap_under_get_rule(text_ref as core_foundation::string::CFStringRef).to_string();
+    let text =
+        CFString::wrap_under_get_rule(text_ref as core_foundation::string::CFStringRef).to_string();
     if text.trim().is_empty() {
         return None;
     }

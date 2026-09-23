@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use state::AppState;
+use tauri::Manager;
 use windows::position::PopupPosition;
 
 /// 选区事件防抖窗口：拖选期间事件高频触发，安静 220ms 后才弹出工具条（FR-1.1 ≤300ms）
@@ -27,12 +28,15 @@ fn spawn_dispatcher(
 ) {
     std::thread::spawn(move || {
         let mut pending: Option<selection::Selection> = None;
+        let mut last_change: Option<std::time::Instant> = None;
         loop {
             match rx.recv_timeout(Duration::from_millis(60)) {
                 Ok(selection::SelectionEvent::Selected(sel)) => {
                     // 过滤：空白 / 超长 / 黑名单（FR-1.4 / FR-1.5）
                     let trimmed = sel.text.trim();
-                    if trimmed.is_empty() || trimmed.chars().count() > config.general.max_selection_chars {
+                    if trimmed.is_empty()
+                        || trimmed.chars().count() > config.general.max_selection_chars
+                    {
                         continue;
                     }
                     if let Some(app_name) = frontmost_app_name() {
@@ -46,22 +50,28 @@ fn spawn_dispatcher(
                         }
                     }
                     pending = Some(sel);
+                    last_change = Some(std::time::Instant::now());
                 }
                 Ok(selection::SelectionEvent::Cleared) => {
                     pending = None;
+                    last_change = None;
                     *state.last_selection.lock().unwrap() = None;
                     windows::manager::hide_toolbar(&app);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // 防抖到期：发出最后的选区
-                    if let Some(sel) = pending.take() {
-                        let anchor = sel.anchor;
-                        *state.last_selection.lock().unwrap() = Some(sel);
-                        let pref = match config.general.popup_position.as_str() {
-                            "top-right" => PopupPosition::TopRight,
-                            _ => PopupPosition::Below,
-                        };
-                        windows::manager::show_toolbar_at(&app, anchor, pref);
+                    // 防抖到期（安静满 DEBOUNCE 才弹出，FR-1.1 ≤300ms）
+                    let quiet = last_change.is_some_and(|t| t.elapsed() >= DEBOUNCE);
+                    if quiet {
+                        last_change = None;
+                        if let Some(sel) = pending.take() {
+                            let anchor = sel.anchor;
+                            *state.last_selection.lock().unwrap() = Some(sel);
+                            let pref = match config.general.popup_position.as_str() {
+                                "top-right" => PopupPosition::TopRight,
+                                _ => PopupPosition::Below,
+                            };
+                            windows::manager::show_toolbar_at(&app, anchor, pref);
+                        }
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -86,7 +96,11 @@ fn frontmost_app_name() -> Option<String> {
 }
 
 /// 按触发模式启动选区监听（FR-1.3）
-fn start_selection_watchers(app: &tauri::AppHandle, tx: mpsc::Sender<selection::SelectionEvent>, auto: bool) {
+fn start_selection_watchers(
+    app: &tauri::AppHandle,
+    tx: mpsc::Sender<selection::SelectionEvent>,
+    auto: bool,
+) {
     if !auto {
         log::info!("trigger_mode=shortcut：仅快捷键通道");
         return;
@@ -102,7 +116,7 @@ fn start_selection_watchers(app: &tauri::AppHandle, tx: mpsc::Sender<selection::
     }
     #[cfg(windows)]
     {
-        selection::uia::start(tx);
+        selection::uia::start(tx, app.clone());
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
@@ -112,35 +126,45 @@ fn start_selection_watchers(app: &tauri::AppHandle, tx: mpsc::Sender<selection::
 }
 
 /// 注册全局快捷键（FR-1.3 / FR-6.1）
-fn register_shortcuts(app: &tauri::AppHandle, config: Arc<config::AppConfig>) -> Result<(), Box<dyn std::error::Error>> {
+fn register_shortcuts(
+    app: &tauri::AppHandle,
+    config: Arc<config::AppConfig>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
     let toggle = config.general.shortcut_toggle.clone();
     let settings = config.general.shortcut_settings.clone();
 
-    app.global_shortcut().on_shortcut(toggle, move |app, _shortcut, event| {
-        if event.state != ShortcutState::Pressed {
-            return;
-        }
-        // 快捷键通道：读取剪贴板 → 弹出工具条（FR-1.3 shortcut 模式）
-        if let Some(sel) = selection::clipboard::read_selection_from_clipboard(app) {
-            let app2 = app.clone();
-            let st = app2.state::<AppState>();
-            let pref = match st.config.read().general.popup_position.as_str() {
-                "top-right" => PopupPosition::TopRight,
-                _ => PopupPosition::Below,
-            };
-            *st.last_selection.lock().unwrap() = Some(sel.clone());
-            windows::manager::show_toolbar_at(app, sel.anchor, pref);
-        }
-    })?;
+    app.global_shortcut()
+        .on_shortcut(toggle.as_str(), move |app, _shortcut, event| {
+            if event.state != ShortcutState::Pressed {
+                return;
+            }
+            // 快捷键通道：读取剪贴板 → 弹出工具条（FR-1.3 shortcut 模式）
+            if let Some(sel) = selection::clipboard::read_selection_from_clipboard(app) {
+                let app2 = app.clone();
+                let st = app2.state::<AppState>();
+                let pref = match st.config.read().general.popup_position.as_str() {
+                    "top-right" => PopupPosition::TopRight,
+                    _ => PopupPosition::Below,
+                };
+                *st.last_selection.lock().unwrap() = Some(sel.clone());
+                windows::manager::show_toolbar_at(app, sel.anchor, pref);
+            }
+        })?;
 
-    app.global_shortcut().on_shortcut(settings, move |app, _shortcut, event| {
-        if event.state != ShortcutState::Pressed {
-            return;
-        }
-        windows::manager::show_window(app, "settings", windows::WindowKind::Settings, "settings.html");
-    })?;
+    app.global_shortcut()
+        .on_shortcut(settings.as_str(), move |app, _shortcut, event| {
+            if event.state != ShortcutState::Pressed {
+                return;
+            }
+            windows::manager::show_window(
+                app,
+                "settings",
+                windows::WindowKind::Settings,
+                "settings.html",
+            );
+        })?;
     Ok(())
 }
 
@@ -169,7 +193,7 @@ pub fn run() {
 
             // 写 pid 文件（CLI status / stop 用，FR-7.2）
             if let Some(pid_path) = dirs::runtime_dir()
-                .or_else(dirs::temp_dir)
+                .or_else(|| Some(std::env::temp_dir()))
                 .map(|d| d.join("wordpick.pid"))
             {
                 let _ = std::fs::write(&pid_path, std::process::id().to_string());

@@ -1,7 +1,8 @@
 //! 系统托盘菜单（FR-7.5）与开机自启（FR-7.4）。
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{Manager, Runtime};
+use tauri::Manager;
+use tauri_plugin_autostart::ManagerExt;
 
 use crate::windows::{manager, WindowKind};
 
@@ -11,7 +12,10 @@ fn tray_icon() -> tauri::image::Image<'static> {
     let mut rgba = vec![0u8; N * N * 4];
     for y in 0..N {
         for x in 0..N {
-            let corner = x < 6 && y < 6 || x >= N - 6 && y < 6 || x < 6 && y >= N - 6 || x >= N - 6 && y >= N - 6;
+            let corner = x < 6 && y < 6
+                || x >= N - 6 && y < 6
+                || x < 6 && y >= N - 6
+                || x >= N - 6 && y >= N - 6;
             if corner {
                 continue; // 圆角透明
             }
@@ -22,27 +26,35 @@ fn tray_icon() -> tauri::image::Image<'static> {
             rgba[i + 3] = 255;
         }
     }
-    tauri::image::Image::from_rgba(&rgba, N as u32, N as u32).expect("tray icon")
+    tauri::image::Image::new_owned(rgba, N as u32, N as u32)
 }
 
-pub fn setup_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
+pub fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let settings = MenuItem::with_id(app, "settings", "设置…", true, Some("CmdOrCtrl+,"))?;
-    let autostart = CheckMenuItem::with_id(app, "autostart", "开机自启", true, true, None)?;
+    let autostart = CheckMenuItem::with_id(app, "autostart", "开机自启", true, true, None::<&str>)?;
     let show = MenuItem::with_id(app, "show", "显示工具条", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&settings, &autostart, &show, &PredefinedMenuItem::separator(app)?, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &settings,
+            &autostart,
+            &show,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
+    )?;
 
-    let autostart_enabled = app
-        .autolaunch()
-        .map(|a| a.is_enabled().unwrap_or(false))
-        .unwrap_or(false);
+    let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
     let _ = autostart.set_checked(autostart_enabled);
 
     TrayIconBuilder::new()
         .icon(tray_icon())
         .menu(&menu)
         .on_menu_event(move |app, event| match event.id().as_ref() {
-            "settings" => manager::show_window(app, "settings", WindowKind::Settings, "settings.html"),
+            "settings" => {
+                manager::show_window(app, "settings", WindowKind::Settings, "settings.html")
+            }
             "show" => {
                 // 唤起工具条显示（配合快捷键读取剪贴板路径在 lib.rs 注册）
                 if let Some(sel) = crate::selection::clipboard::read_selection_from_clipboard(app) {
@@ -56,10 +68,13 @@ pub fn setup_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
                 }
             }
             "autostart" => {
-                if let Ok(auto) = app.autolaunch() {
-                    let target = !auto.is_enabled().unwrap_or(false);
-                    let _ = if target { auto.enable() } else { auto.disable() };
-                }
+                let auto = app.autolaunch();
+                let target = !auto.is_enabled().unwrap_or(false);
+                let _ = if target {
+                    auto.enable()
+                } else {
+                    auto.disable()
+                };
             }
             "quit" => app.exit(0),
             _ => {}

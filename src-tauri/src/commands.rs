@@ -1,5 +1,6 @@
 //! Tauri commands：UI 层与 Rust 核心层之间的唯一通道（NFR 4.5 解耦）
 use tauri::{Manager, State};
+use tauri_plugin_autostart::ManagerExt;
 
 use crate::llm::adapter::Scenario;
 use crate::state::{AppState, PanelContext};
@@ -43,7 +44,9 @@ pub fn place_panel_near_selection(
     use crate::windows::position::locate;
     use tauri::PhysicalPosition;
     let Some(anchor) = anchor else { return };
-    let Some(win) = app.get_webview_window("panel") else { return };
+    let Some(win) = app.get_webview_window("panel") else {
+        return;
+    };
     let (workarea, scale) = app
         .monitor_from_point(anchor.0 as f64, anchor.1 as f64)
         .ok()
@@ -53,15 +56,30 @@ pub fn place_panel_near_selection(
                 crate::windows::position::Rect {
                     x: m.position().x,
                     y: m.position().y,
-                    w: m.size().width,
-                    h: m.size().height,
+                    w: m.size().width as i32,
+                    h: m.size().height as i32,
                 },
                 m.scale_factor(),
             )
         })
-        .unwrap_or((crate::windows::position::Rect { x: 0, y: 0, w: 1920, h: 1080 }, 1.0));
-    let size = win.inner_size().unwrap_or(tauri::PhysicalSize::new(420, 540));
-    let (x, y) = locate(anchor, (size.width as i32, size.height as i32), workarea, pref);
+        .unwrap_or((
+            crate::windows::position::Rect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            },
+            1.0,
+        ));
+    let size = win
+        .inner_size()
+        .unwrap_or(tauri::PhysicalSize::new(420, 540));
+    let (x, y) = locate(
+        anchor,
+        (size.width as i32, size.height as i32),
+        workarea,
+        pref,
+    );
     let _ = win.set_position(PhysicalPosition::new(
         (x as f64 / scale) as i32,
         (y as f64 / scale) as i32,
@@ -136,7 +154,10 @@ pub fn build_first_messages(
             role: "system".into(),
             content: adapter::system_prompt(scenario, &source_lang, &target_lang),
         },
-        ChatMessage { role: "user".into(), content: text },
+        ChatMessage {
+            role: "user".into(),
+            content: text,
+        },
     ]
 }
 
@@ -146,8 +167,7 @@ pub fn set_panel_pinned(app: tauri::AppHandle, pinned: bool) -> Result<(), Strin
     let win = app
         .get_webview_window("panel")
         .ok_or_else(|| "panel window not found".to_string())?;
-    win.set_always_on_top(pinned)
-        .map_err(|e| e.to_string())?;
+    win.set_always_on_top(pinned).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -200,7 +220,9 @@ pub fn get_api_key_mask(provider: String, state: State<'_, AppState>) -> Option<
 pub fn has_any_api_key(state: State<'_, AppState>) -> bool {
     let cfg = state.config.read();
     cfg.providers.iter().any(|p| {
-        crate::secure::read_key(&p.name).map(|k| !k.is_empty()).unwrap_or(false)
+        crate::secure::read_key(&p.name)
+            .map(|k| !k.is_empty())
+            .unwrap_or(false)
             || !crate::config::resolve_env_placeholder(&p.api_key).is_empty()
     })
 }
@@ -221,17 +243,18 @@ pub fn fit_toolbar_window(app: tauri::AppHandle, width: f64, height: f64) -> Res
 
 #[tauri::command]
 pub fn get_autostart(app: tauri::AppHandle) -> bool {
-    app.autolaunch().map(|a| a.is_enabled().unwrap_or(false)).unwrap_or(false)
+    app.autolaunch().is_enabled().unwrap_or(false)
 }
 
 #[tauri::command]
 pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
-    let auto = app.autolaunch().map_err(|e| e.to_string())?;
-    if enabled {
-        auto.enable().map_err(|e| e.to_string())
+    let auto = app.autolaunch();
+    let result = if enabled {
+        auto.enable()
     } else {
-        auto.disable().map_err(|e| e.to_string())
-    }
+        auto.disable()
+    };
+    result.map_err(|e| e.to_string())
 }
 
 /// 错误类型导出（前端按类型渲染友好错误与设置入口，FR-5.4）

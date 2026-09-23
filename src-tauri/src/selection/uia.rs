@@ -6,28 +6,26 @@
 use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::UI::Accessibility::{
-    SetWinEventHook, UnhookWinEvent, EVENT_OBJECT_TEXTSELECTIONCHANGED, HWINEVENTHOOK,
+use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetGUIThreadInfo, GetWindowThreadProcessId, EVENT_OBJECT_TEXTSELECTIONCHANGED, GUITHREADINFO,
     WINEVENT_OUTOFCONTEXT,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO, WM_COPY,
-};
 
-use super::super::clipboard;
+use super::clipboard;
 use super::{Selection, SelectionEvent, SelectionSource};
 
-static TX: OnceLock<Sender<SelectionEvent>> = OnceLock::new();
-static HOOK: OnceLock<HWINEVENTHOOK> = OnceLock::new();
+static CTX: OnceLock<(Sender<SelectionEvent>, tauri::AppHandle)> = OnceLock::new();
+static HOOK: OnceLock<isize> = OnceLock::new();
 
 /// 启动 WinEventHook 监听线程（事件经 channel 发给统一分发器）
-pub fn start(tx: Sender<SelectionEvent>) {
-    if TX.set(tx).is_err() {
+pub fn start(tx: Sender<SelectionEvent>, app: tauri::AppHandle) {
+    if CTX.set((tx, app)).is_err() {
         return;
     }
     std::thread::spawn(|| unsafe {
-        let hook = SetWinEventHook(
+        let hook: HWINEVENTHOOK = SetWinEventHook(
             EVENT_OBJECT_TEXTSELECTIONCHANGED,
             EVENT_OBJECT_TEXTSELECTIONCHANGED,
             None,
@@ -36,23 +34,12 @@ pub fn start(tx: Sender<SelectionEvent>) {
             0,
             WINEVENT_OUTOFCONTEXT,
         );
-        if let Ok(h) = hook {
-            let _ = HOOK.set(h);
-            log::info!("UIA/WinEvent selection watcher started");
-        } else {
-            log::error!("SetWinEventHook failed");
-            return;
-        }
-        // 消息循环：GetGUIThreadInfo 等本线程调用需要消息队列
+        let _ = HOOK.set(hook.0 as isize);
+        log::info!("UIA/WinEvent selection watcher started");
+
+        // 消息循环：本线程的 WinEvent 回调需要消息队列
         let mut msg = windows::Win32::UI::WindowsAndMessaging::MSG::default();
-        while windows::Win32::UI::WindowsAndMessaging::GetMessageW(
-            &mut msg,
-            HWND(std::ptr::null_mut()),
-            0,
-            0,
-        )
-        .as_bool()
-        {
+        while windows::Win32::UI::WindowsAndMessaging::GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = windows::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
             let _ = windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
         }
@@ -68,16 +55,18 @@ unsafe extern "system" fn on_selection_changed(
     _ideventthread: u32,
     _dwmseventtime: u32,
 ) {
-    let Some(tx) = TX.get() else { return };
-    let Some(sel) = read_selection(hwnd) else { return };
+    let Some((tx, app)) = CTX.get() else { return };
+    let Some(sel) = read_selection(app, hwnd) else {
+        return;
+    };
     let _ = tx.send(SelectionEvent::Selected(sel));
 }
 
-fn read_selection(hwnd: HWND) -> Option<Selection> {
+fn read_selection(app: &tauri::AppHandle, hwnd: HWND) -> Option<Selection> {
     // 1) 定位：caret/选区矩形（拿不到则以光标位置兜底，§5.3「尽力而为」）
-    let anchor = caret_anchor(hwnd).or_else(cursor_anchor);
+    let anchor = unsafe { caret_anchor(hwnd) }.or_else(clipboard::cursor_pos);
     // 2) 文本：WM_COPY → 剪贴板 → 还原
-    let text = clipboard::copy_selection_via_wm_copy(hwnd)?;
+    let text = clipboard::copy_selection_via_wm_copy(app, hwnd)?;
     if text.trim().is_empty() {
         return None;
     }
@@ -90,14 +79,16 @@ fn read_selection(hwnd: HWND) -> Option<Selection> {
 
 /// GetGUIThreadInfo 取选区/caret 矩形中心（逻辑像素）
 unsafe fn caret_anchor(hwnd: HWND) -> Option<(i32, i32)> {
-    let mut info = GUITHREADINFO::default();
-    info.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+    let mut info = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
     let thread_id = unsafe { GetWindowThreadProcessId(hwnd, None) };
     if thread_id == 0 {
         return None;
     }
     unsafe {
-        if !GetGUIThreadInfo(thread_id, &mut info).as_bool() {
+        if GetGUIThreadInfo(thread_id, &mut info).is_err() {
             return None;
         }
     }
@@ -106,20 +97,6 @@ unsafe fn caret_anchor(hwnd: HWND) -> Option<(i32, i32)> {
         return None;
     }
     Some(((rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2))
-}
-
-/// 兜底：光标位置
-fn cursor_anchor() -> Option<(i32, i32)> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::GetCursorPos;
-    use windows::Win32::UI::Input::KeyboardAndMouse::POINT;
-    let mut pt = POINT { x: 0, y: 0 };
-    unsafe {
-        if GetCursorPos(&mut pt).as_bool() {
-            Some((pt.x, pt.y))
-        } else {
-            None
-        }
-    }
 }
 
 /// 前台窗口标题（应用黑名单用，FR-1.5）
@@ -139,7 +116,7 @@ pub fn frontmost_app_name() -> Option<String> {
     }
 }
 
-/// 本模块仅做选区监听；文本能力委托 clipboard::copy_selection_via_wm_copy。
-/// 增强路径（UIA TextPattern）：对支持 TextPattern 的应用（Edge/Chrome/Office/记事本）
-/// 可用 IUIAutomationTextPattern::GetSelection + GetBoundingRectangles 获得精确选区
-/// 坐标并避免触碰剪贴板，后续按需在该模块内叠加。
+// 本模块仅做选区监听；文本能力委托 clipboard::copy_selection_via_wm_copy。
+// 增强路径（UIA TextPattern）：对支持 TextPattern 的应用（Edge/Chrome/Office/记事本）
+// 可用 IUIAutomationTextPattern::GetSelection + GetBoundingRectangles 获得精确选区
+// 坐标并避免触碰剪贴板，后续按需在该模块内叠加。

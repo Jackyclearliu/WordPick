@@ -44,9 +44,19 @@ pub struct ChatRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatEvent {
-    Chunk { request_id: String, delta: String },
-    Done { request_id: String, usage: Option<Usage> },
-    Error { request_id: String, kind: ErrorKind, message: String },
+    Chunk {
+        request_id: String,
+        delta: String,
+    },
+    Done {
+        request_id: String,
+        usage: Option<Usage>,
+    },
+    Error {
+        request_id: String,
+        kind: ErrorKind,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,7 +170,11 @@ async fn run_with_retry(
     loop {
         match run_once(app, req, flag).await {
             Ok(()) => return Ok(()),
-            Err(e @ (ErrorKind::RateLimited, _) | e @ (ErrorKind::InvalidKey, _) | e @ (ErrorKind::BadRequest, _)) => {
+            Err(
+                e @ (ErrorKind::RateLimited, _)
+                | e @ (ErrorKind::InvalidKey, _)
+                | e @ (ErrorKind::BadRequest, _),
+            ) => {
                 return Err(e); // 不重试：限流 / Key 无效 / 请求错误直接反馈
             }
             Err(e) if attempt < MAX_RETRIES => {
@@ -188,7 +202,10 @@ async fn run_once(
         .build()
         .map_err(|e| (ErrorKind::Network, e.to_string()))?;
 
-    let url = format!("{}/chat/completions", req.provider.base_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/chat/completions",
+        req.provider.base_url.trim_end_matches('/')
+    );
     let body = CompletionBody {
         model: req.model.clone(),
         messages: req.messages.clone(),
@@ -217,14 +234,20 @@ async fn run_once(
     match resp.status() {
         StatusCode::OK => {}
         StatusCode::TOO_MANY_REQUESTS => {
-            return Err((ErrorKind::RateLimited, "请求过于频繁（429 限流），请稍后再试".into()));
+            return Err((
+                ErrorKind::RateLimited,
+                "请求过于频繁（429 限流），请稍后再试".into(),
+            ));
         }
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
             return Err((ErrorKind::InvalidKey, "API Key 无效或未授权".into()));
         }
         s if s.is_client_error() => {
             let text = resp.text().await.unwrap_or_default();
-            return Err((ErrorKind::BadRequest, format!("请求被服务端拒绝（{s}）：{text}")));
+            return Err((
+                ErrorKind::BadRequest,
+                format!("请求被服务端拒绝（{s}）：{text}"),
+            ));
         }
         s => {
             let text = resp.text().await.unwrap_or_default();
@@ -241,16 +264,22 @@ async fn run_once(
         let bytes = chunk.map_err(|e| (ErrorKind::Network, e.to_string()))?;
         buf.push_str(&String::from_utf8_lossy(&bytes));
 
-        // SSE 按空行分包
-        while let Some((event, rest)) = buf.split_once("\n\n") {
-            buf = rest.to_string();
+        // SSE 按空行分包（先切出事件段再清空缓冲区，避免借用冲突）
+        while let Some(pos) = buf.find("\n\n") {
+            let rest = buf.split_off(pos + 2);
+            let event = std::mem::replace(&mut buf, rest);
             for line in event.lines() {
-                let Some(data) = line.strip_prefix("data:") else { continue };
+                let Some(data) = line.strip_prefix("data:") else {
+                    continue;
+                };
                 let data = data.trim();
                 if data == "[DONE]" {
                     let _ = app.emit(
                         "wp://chat-chunk",
-                        ChatEvent::Done { request_id: req.request_id.clone(), usage: None },
+                        ChatEvent::Done {
+                            request_id: req.request_id.clone(),
+                            usage: None,
+                        },
                     );
                     return Ok(());
                 }
@@ -263,7 +292,10 @@ async fn run_once(
                     {
                         let _ = app.emit(
                             "wp://chat-chunk",
-                            ChatEvent::Chunk { request_id: req.request_id.clone(), delta },
+                            ChatEvent::Chunk {
+                                request_id: req.request_id.clone(),
+                                delta,
+                            },
                         );
                     }
                 }
@@ -272,20 +304,29 @@ async fn run_once(
     }
     let _ = app.emit(
         "wp://chat-chunk",
-        ChatEvent::Done { request_id: req.request_id.clone(), usage: None },
+        ChatEvent::Done {
+            request_id: req.request_id.clone(),
+            usage: None,
+        },
     );
     Ok(())
 }
 
 /// 连通性测试（FR-6.5）：最小化请求，返回延迟或错误类型
-pub async fn test_connection(provider: &ProviderConfig, model: &str) -> Result<u128, (ErrorKind, String)> {
+pub async fn test_connection(
+    provider: &ProviderConfig,
+    model: &str,
+) -> Result<u128, (ErrorKind, String)> {
     let started = std::time::Instant::now();
     let key = resolve_api_key(provider).map_err(|k| (k, "API Key 未配置或无效".into()))?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| (ErrorKind::Network, e.to_string()))?;
-    let url = format!("{}/chat/completions", provider.base_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/chat/completions",
+        provider.base_url.trim_end_matches('/')
+    );
     let body = serde_json::json!({
         "model": model,
         "messages": [{"role": "user", "content": "ping"}],

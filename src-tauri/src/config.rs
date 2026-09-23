@@ -50,8 +50,7 @@ pub struct LimitsConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         // 内置默认：从仓库 config/default.toml 编译进二进制（FR-6.2）
-        toml::from_str(include_str!("../../config/default.toml"))
-            .expect("内置默认配置必须可解析")
+        toml::from_str(include_str!("../../config/default.toml")).expect("内置默认配置必须可解析")
     }
 }
 
@@ -118,7 +117,10 @@ mod tests {
     #[test]
     fn env_placeholder_resolves() {
         std::env::set_var("WORDPICK_TEST_KEY", "sk-test-123");
-        assert_eq!(resolve_env_placeholder("${WORDPICK_TEST_KEY}"), "sk-test-123");
+        assert_eq!(
+            resolve_env_placeholder("${WORDPICK_TEST_KEY}"),
+            "sk-test-123"
+        );
         assert_eq!(resolve_env_placeholder("plain-key"), "plain-key");
         assert_eq!(resolve_env_placeholder("${}"), "${}");
     }
