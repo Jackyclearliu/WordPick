@@ -194,9 +194,24 @@ fn mouse_state() -> (bool, (i32, i32)) {
 }
 
 /// 模拟 Ctrl+C 通道：Chromium 系应用的划词取词（用户在目标应用内拖选松开，前台即目标）
+/// ⚠️ 终端类窗口禁用：conhost 会把 Ctrl+C 中断转发给所有附着该控制台的进程
+/// （dev 模式下直接杀死本应用，exit 0xc000013a），并可能干扰用户终端内运行的程序。
 fn read_selection_via_ctrl_c(app: &tauri::AppHandle, hwnd: HWND) -> Option<Selection> {
-    let anchor = unsafe { caret_anchor(hwnd) }.or_else(clipboard::cursor_pos);
+    if is_console_window(hwnd) {
+        // 终端（conhost/Windows Terminal 等）：退回 WM_COPY 哨兵通道（支持选区复制的终端可用）
+        return read_selection(app, hwnd);
+    }
     let text = clipboard::simulate_ctrl_c_probe(app)?;
+    build_selection(text, anchor_for(hwnd))
+}
+
+/// WinEvent 通道（经典应用）：WM_COPY 哨兵取词
+fn read_selection(app: &tauri::AppHandle, hwnd: HWND) -> Option<Selection> {
+    let text = clipboard::copy_selection_via_wm_copy(app, hwnd)?;
+    build_selection(text, anchor_for(hwnd))
+}
+
+fn build_selection(text: String, anchor: Option<(i32, i32)>) -> Option<Selection> {
     if text.trim().is_empty() {
         return None;
     }
@@ -207,18 +222,58 @@ fn read_selection_via_ctrl_c(app: &tauri::AppHandle, hwnd: HWND) -> Option<Selec
     })
 }
 
-/// WinEvent 通道（经典应用）：WM_COPY 哨兵取词
-fn read_selection(app: &tauri::AppHandle, hwnd: HWND) -> Option<Selection> {
-    let anchor = unsafe { caret_anchor(hwnd) }.or_else(clipboard::cursor_pos);
-    let text = clipboard::copy_selection_via_wm_copy(app, hwnd)?;
-    if text.trim().is_empty() {
-        return None;
+/// 锚点：caret 仅在「可信且离光标不远」时采用——XAML 应用（新版记事本）的
+/// GetGUIThreadInfo 可能给出原点处的无效 caret，直接把工具条弹到屏幕左上角。
+/// 拖选释放时光标就在选区末端，作为 caret 缺失/不可信时的兜底。
+fn anchor_for(hwnd: HWND) -> Option<(i32, i32)> {
+    let caret = unsafe { caret_anchor(hwnd) };
+    let cursor = clipboard::cursor_pos();
+    match (caret, cursor) {
+        (Some(c), Some(m)) if (c.0 - m.0).abs() + (c.1 - m.1).abs() <= 400 => Some(c),
+        (_, Some(m)) => Some(m),
+        (Some(c), None) => Some(c),
+        _ => None,
     }
-    Some(Selection {
-        text,
-        anchor,
-        source: SelectionSource::Uia,
-    })
+}
+
+/// 前台窗口所属进程是否为控制台/终端类（对它们禁止模拟 Ctrl+C）
+fn is_console_window(hwnd: HWND) -> bool {
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut buf = [0u16; 260];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            h,
+            PROCESS_NAME_FORMAT(0),
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_ok();
+        let _ = windows::Win32::Foundation::CloseHandle(h);
+        if !ok {
+            return false;
+        }
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        let name = path.rsplit('\\').next().unwrap_or_default().to_lowercase();
+        matches!(
+            name.as_str(),
+            "conhost.exe"
+                | "openconsole.exe"
+                | "windowsterminal.exe"
+                | "wezterm-gui.exe"
+                | "alacritty.exe"
+                | "tabby.exe"
+                | "hyper.exe"
+        )
+    }
 }
 
 /// GetGUIThreadInfo 取选区/caret 矩形中心（逻辑像素）

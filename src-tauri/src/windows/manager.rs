@@ -90,32 +90,24 @@ pub fn position_at(
     anchor: (i32, i32),
     pref: PopupPosition,
 ) {
-    // 工作区：优先取包含锚点的显示器，退回主显示器（多显示器 + DPI 由 Tauri 统一处理）
-    let (workarea, scale) = app
+    // 工作区：优先取包含锚点的显示器，退回主显示器（多显示器由 Tauri 统一处理）
+    let workarea = app
         .monitor_from_point(anchor.0 as f64, anchor.1 as f64)
         .ok()
         .flatten()
         .or_else(|| app.primary_monitor().ok().flatten())
-        .map(|m| {
-            (
-                Rect {
-                    x: m.position().x,
-                    y: m.position().y,
-                    w: m.size().width as i32,
-                    h: m.size().height as i32,
-                },
-                m.scale_factor(),
-            )
+        .map(|m| Rect {
+            x: m.position().x,
+            y: m.position().y,
+            w: m.size().width as i32,
+            h: m.size().height as i32,
         })
-        .unwrap_or((
-            Rect {
-                x: 0,
-                y: 0,
-                w: 1920,
-                h: 1080,
-            },
-            1.0,
-        ));
+        .unwrap_or(Rect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        });
 
     let size = win
         .inner_size()
@@ -126,10 +118,9 @@ pub fn position_at(
         workarea,
         pref,
     );
-    let _ = win.set_position(PhysicalPosition::new(
-        (x as f64 / scale) as i32,
-        (y as f64 / scale) as i32,
-    ));
+    // 锚点（GetCursorPos/GetGUIThreadInfo）与工作区均为物理像素，直接置位；
+    // 再除 scale 会把高 DPI 屏上的窗口向原点拉（「跑到左上角」 bug）
+    let _ = win.set_position(PhysicalPosition::new(x, y));
 }
 
 fn place_toolbar(
