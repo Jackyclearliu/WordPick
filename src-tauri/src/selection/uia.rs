@@ -74,6 +74,23 @@ pub fn start(tx: Sender<SelectionEvent>, app: tauri::AppHandle) {
         last_foreign_hwnd: None,
     }));
     std::thread::spawn(|| unsafe {
+        // 低层键盘钩子（FR-2.4 数字键）安装在本线程：LL 钩子回调经安装线程的
+        // 消息队列分发，本线程有健壮的 GetMessageW 循环，回调绝不积压
+        // （曾装在 poll_loop 并用 MsgWait+PeekMessage 泵消息：热循环下按键被
+        // 系统丢弃，表现为「Ctrl+C/Delete/打字全灭」，直到进程退出才恢复）。
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, WH_KEYBOARD_LL};
+        let hmod = GetModuleHandleW(None).unwrap_or_default();
+        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(toolbar_kb_hook), hmod, 0) {
+            Ok(h) => {
+                let _ = KB_HOOK.set(h.0 as isize);
+                log::info!("toolbar keyboard hook installed");
+            }
+            Err(e) => {
+                log::warn!("toolbar keyboard hook install failed（数字键快捷触发不可用）: {e}")
+            }
+        }
+
         let hook: HWINEVENTHOOK = SetWinEventHook(
             EVENT_OBJECT_TEXTSELECTIONCHANGED,
             EVENT_OBJECT_TEXTSELECTIONCHANGED,
@@ -173,45 +190,12 @@ unsafe extern "system" fn on_selection_changed(
 
 /// 鼠标拖选轮询：左键「按住→位移→松开」即对前台应用做模拟 Ctrl+C 探测。
 /// 前台切换离开选区窗口时上报 Cleared（工具条随选区消失而隐藏，FR-1.2）。
-/// 本线程同时承载工具条键盘钩子（低层钩子回调需经本线程消息队列分发），
-/// 故用 MsgWaitForMultipleObjectsEx 等待 + PeekMessage 泵消息，替代 sleep。
+/// 纯 sleep 轮询即可：键盘钩子已挪到 WinEvent 线程，本线程无需泵消息。
 fn poll_loop() {
-    unsafe {
-        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-        use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, WH_KEYBOARD_LL};
-        let hmod = GetModuleHandleW(None).unwrap_or_default();
-        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(toolbar_kb_hook), hmod, 0) {
-            Ok(h) => {
-                let _ = KB_HOOK.set(h.0 as isize);
-                log::info!("toolbar keyboard hook installed");
-            }
-            Err(e) => {
-                log::warn!("toolbar keyboard hook install failed（数字键快捷触发不可用）: {e}")
-            }
-        }
-    }
-
     let mut down_since: Option<Instant> = None;
     let mut down_pos = (0i32, 0i32);
     loop {
-        // 等待期间泵消息（WinEvent/键盘钩子的回调都经本线程队列）
-        unsafe {
-            use windows::Win32::UI::WindowsAndMessaging::{
-                DispatchMessageW, MsgWaitForMultipleObjectsEx, PeekMessageW, TranslateMessage, MSG,
-                MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
-            };
-            let _ = MsgWaitForMultipleObjectsEx(
-                None,
-                POLL_INTERVAL.as_millis() as u32,
-                QS_ALLINPUT,
-                MWMO_INPUTAVAILABLE,
-            );
-            let mut msg = MSG::default();
-            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                let _ = TranslateMessage(&msg);
-                let _ = DispatchMessageW(&msg);
-            }
-        }
+        std::thread::sleep(POLL_INTERVAL);
 
         let Some((tx, app)) = CTX.get() else { continue };
         let fg = foreground_hwnd();

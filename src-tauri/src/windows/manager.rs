@@ -43,7 +43,27 @@ fn build_window(
             .decorations(true)
             .inner_size(760.0, 600.0),
     };
-    builder.build()
+    let win = builder.build()?;
+    // 工具条加 WS_EX_NOACTIVATE：「永不激活」顶层窗口。tauri 的 show() 走
+    // SW_SHOW，正常会尝试激活并抢占前台（目标应用按键随即失联——系统级
+    // 「Ctrl+C/Delete/打字全灭」的根因）；带此样式的窗口 SW_SHOW 只显示、
+    // 永不夺焦点，渲染路径保持 tauri 原生（直接 SWP_SHOWWINDOW 曾致 WebView2
+    // 空白不渲染）。鼠标点击照常工作；1/2/3/Esc 由低层键盘钩子在「光标位于
+    // 工具条热区内」时接管，见 selection::uia::start（FR-2.4）。
+    if kind == WindowKind::Toolbar {
+        if let Ok(raw) = win.hwnd() {
+            unsafe {
+                use windows::Win32::Foundation::HWND;
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+                };
+                let hwnd = HWND(raw.0);
+                let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE.0 as isize);
+            }
+        }
+    }
+    Ok(win)
 }
 
 /// 取已存在的窗口；不存在则调度创建（异步运行时线程），创建完成后回调 on_created。
@@ -143,19 +163,79 @@ fn place_toolbar(
     anchor: (i32, i32),
     pref: PopupPosition,
 ) {
-    // 先隐藏再移动：任何位置跳变都不暴露，只呈现最终位置
-    let _ = win.hide();
-    let (x, y) = position_at(app, win, anchor, pref);
-    let size = win
-        .inner_size()
-        .unwrap_or(tauri::PhysicalSize::new(280, 44));
-    *TOOLBAR_RECT.lock() = Some((x, y, size.width as i32, size.height as i32));
-    if let Err(e) = win.show() {
-        log::warn!("toolbar show failed: {e}");
+    // 整条「隐藏→定位→显示→提z序」必须在主线程同步按序执行：
+    // 分散调用时 show()/set_position() 只是向主线程投递消息，与紧随其后的
+    // raise（立即执行）乱序——raise 先跑、show 后到时会把 WS_EX_NOACTIVATE
+    // 窗口按 SW_SHOW 语义压回活动窗口之下（被刚拖选激活的目标应用盖住）。
+    let app2 = app.clone();
+    let win = win.clone();
+    let app_for_call = app.clone();
+    let _ = app_for_call.run_on_main_thread(move || {
+        // 先隐藏再移动：任何位置跳变都不暴露，只呈现最终位置
+        let _ = win.hide();
+        let (x, y) = position_at(&app2, &win, anchor, pref);
+        let size = win
+            .inner_size()
+            .unwrap_or(tauri::PhysicalSize::new(280, 44));
+        *TOOLBAR_RECT.lock() = Some((x, y, size.width as i32, size.height as i32));
+        // show() 对 WS_EX_NOACTIVATE 窗口只显示不夺焦点（创建时已加样式，见
+        // build_window）；但 SW_SHOW 不提升 z 序，拖选会把目标应用激活到顶层，
+        // 必须随后 SetWindowPos(HWND_TOP|SWP_NOACTIVATE) 提到 z 序顶（仍不夺焦点）。
+        // 1/2/3/Esc 由低层键盘钩子在「光标位于工具条热区内」时接管（FR-2.4）
+        if let Err(e) = win.show() {
+            log::warn!("toolbar show failed: {e}");
+        }
+        raise_no_activate(&win);
+    });
+}
+
+/// 提升窗口到 z 序顶部但不夺前台焦点。工具条（WS_EX_NOACTIVATE）专用：
+/// SW_SHOW 对不可激活窗口不提升 z 序；且 HWND_TOP 的提升受前台锁定限制——
+/// 无前台权限的进程不能把窗口提到活动窗口之上（拖选→显示间隔约 300ms，
+/// 探针 SendInput 挣得的前台权限早已过期），工具条会被目标应用盖住。
+/// HWND_TOPMOST 不受此前台锁定限制（弹层类工具的通行做法），随显示置顶、
+/// 随隐藏摘除（见 hide_toolbar），不会长期霸占最顶层。
+fn raise_no_activate(win: &WebviewWindow) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+    let Ok(raw) = win.hwnd() else { return };
+    let hwnd = HWND(raw.0);
+    unsafe {
+        if let Err(e) = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+        ) {
+            log::warn!("raise toolbar failed: {e}");
+        }
     }
-    // 注意：这里**不能** set_focus——焦点被工具条持有会吞掉目标应用的一切按键
-    // （Ctrl+C/Delete/输入全部失效）。键盘操作（1/2/3/Esc）由低层键盘钩子在
-    // 「光标位于工具条热区内」时接管，见 selection::uia::start（FR-2.4）。
+}
+
+/// 摘除工具条置顶（隐藏时调用；随显随置、随隐随摘）
+fn unset_topmost<R: tauri::Runtime>(win: &WebviewWindow<R>) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+    let Ok(raw) = win.hwnd() else { return };
+    let hwnd = HWND(raw.0);
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_NOTOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+        );
+    }
 }
 
 /// 在选区锚点处显示工具条（含定位算法与工作区约束，FR-1.1）
@@ -214,6 +294,7 @@ where
 {
     *TOOLBAR_RECT.lock() = None;
     if let Some(win) = app.get_webview_window("toolbar") {
+        unset_topmost(&win);
         let _ = win.hide();
     }
 }

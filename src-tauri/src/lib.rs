@@ -54,6 +54,9 @@ fn spawn_dispatcher(
                     last_change = Some(std::time::Instant::now());
                 }
                 Ok(selection::SelectionEvent::Cleared) => {
+                    if pending.is_some() || state.last_selection.lock().unwrap().is_some() {
+                        log::info!("selection cleared → hide toolbar");
+                    }
                     pending = None;
                     last_change = None;
                     *state.last_selection.lock().unwrap() = None;
@@ -66,6 +69,11 @@ fn spawn_dispatcher(
                         last_change = None;
                         if let Some(sel) = pending.take() {
                             let anchor = sel.anchor;
+                            log::info!(
+                                "selection → show toolbar: chars={} anchor={:?}",
+                                sel.text.chars().count(),
+                                anchor
+                            );
                             *state.last_selection.lock().unwrap() = Some(sel);
                             let pref = match config.general.popup_position.as_str() {
                                 "top-right" => PopupPosition::TopRight,
