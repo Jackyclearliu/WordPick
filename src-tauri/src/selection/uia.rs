@@ -12,7 +12,7 @@ use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId,
@@ -97,6 +97,60 @@ pub fn start(tx: Sender<SelectionEvent>, app: tauri::AppHandle) {
     log::info!("drag-selection poller started");
 }
 
+// ---------------------------------------------------------------------------
+// 工具条键盘接管（FR-2.4）：低层键盘钩子，仅当光标位于工具条热区内时吞掉
+// 1/2/3（翻译/解释/设置）与 Esc（关闭）。不抢焦点——焦点若被工具条持有会吞掉
+// 目标应用的一切按键（Ctrl+C/Delete/输入全部失效），钩子方案对其它按键零影响。
+// ---------------------------------------------------------------------------
+
+/// 低层键盘钩子（进程生命周期内常驻；工具条隐藏时热区为 None，钩子直通）
+static KB_HOOK: OnceLock<isize> = OnceLock::new();
+
+const VK_1: u32 = 0x31;
+const VK_2: u32 = 0x32;
+const VK_3: u32 = 0x33;
+const VK_ESCAPE: u32 = 0x1B;
+
+unsafe extern "system" fn toolbar_kb_hook(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, KBDLLHOOKSTRUCT, WM_KEYDOWN, WM_SYSKEYDOWN,
+    };
+    if ncode >= 0 && (wparam.0 as u32 == WM_KEYDOWN || wparam.0 as u32 == WM_SYSKEYDOWN) {
+        let kb = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+        let action = match kb.vkCode {
+            VK_1 => Some("translate"),
+            VK_2 => Some("explain"),
+            VK_3 => Some("settings"),
+            VK_ESCAPE => Some("__esc__"),
+            _ => None,
+        };
+        if let Some(action) = action {
+            let in_hotzone = {
+                let rect = *crate::windows::manager::TOOLBAR_RECT.lock();
+                match (rect, clipboard::cursor_pos()) {
+                    (Some((x, y, w, h)), Some((cx, cy))) => {
+                        cx >= x && cx <= x + w && cy >= y && cy <= y + h
+                    }
+                    _ => false,
+                }
+            };
+            if in_hotzone {
+                if let Some((_tx, app)) = CTX.get() {
+                    if action == "__esc__" {
+                        crate::windows::manager::hide_toolbar(app);
+                    } else {
+                        use tauri::Manager;
+                        let state = app.state::<crate::state::AppState>();
+                        crate::commands::perform_toolbar_action(action, app, &state);
+                    }
+                }
+                return LRESULT(1); // 吞掉按键，不再转发
+            }
+        }
+    }
+    unsafe { CallNextHookEx(None, ncode, wparam, lparam) }
+}
+
 unsafe extern "system" fn on_selection_changed(
     _hwineventhook: HWINEVENTHOOK,
     _event: u32,
@@ -119,11 +173,46 @@ unsafe extern "system" fn on_selection_changed(
 
 /// 鼠标拖选轮询：左键「按住→位移→松开」即对前台应用做模拟 Ctrl+C 探测。
 /// 前台切换离开选区窗口时上报 Cleared（工具条随选区消失而隐藏，FR-1.2）。
+/// 本线程同时承载工具条键盘钩子（低层钩子回调需经本线程消息队列分发），
+/// 故用 MsgWaitForMultipleObjectsEx 等待 + PeekMessage 泵消息，替代 sleep。
 fn poll_loop() {
+    unsafe {
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, WH_KEYBOARD_LL};
+        let hmod = GetModuleHandleW(None).unwrap_or_default();
+        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(toolbar_kb_hook), hmod, 0) {
+            Ok(h) => {
+                let _ = KB_HOOK.set(h.0 as isize);
+                log::info!("toolbar keyboard hook installed");
+            }
+            Err(e) => {
+                log::warn!("toolbar keyboard hook install failed（数字键快捷触发不可用）: {e}")
+            }
+        }
+    }
+
     let mut down_since: Option<Instant> = None;
     let mut down_pos = (0i32, 0i32);
     loop {
-        std::thread::sleep(POLL_INTERVAL);
+        // 等待期间泵消息（WinEvent/键盘钩子的回调都经本线程队列）
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                DispatchMessageW, MsgWaitForMultipleObjectsEx, PeekMessageW, TranslateMessage, MSG,
+                MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
+            };
+            let _ = MsgWaitForMultipleObjectsEx(
+                None,
+                POLL_INTERVAL.as_millis() as u32,
+                QS_ALLINPUT,
+                MWMO_INPUTAVAILABLE,
+            );
+            let mut msg = MSG::default();
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                let _ = DispatchMessageW(&msg);
+            }
+        }
+
         let Some((tx, app)) = CTX.get() else { continue };
         let fg = foreground_hwnd();
 

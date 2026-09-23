@@ -9,7 +9,12 @@ use crate::windows::{manager, WindowKind};
 /// 工具条功能按钮点击（FR-2.1）
 #[tauri::command]
 pub fn toolbar_action(action: String, app: tauri::AppHandle, state: State<'_, AppState>) {
-    match action.as_str() {
+    perform_toolbar_action(&action, &app, &state);
+}
+
+/// 工具条动作的实际实现：按钮点击与键盘钩子（FR-2.4 数字键）共用
+pub fn perform_toolbar_action(action: &str, app: &tauri::AppHandle, state: &AppState) {
+    match action {
         "translate" | "explain" => {
             let scenario = if action == "translate" {
                 Scenario::Translate
@@ -27,10 +32,10 @@ pub fn toolbar_action(action: String, app: tauri::AppHandle, state: State<'_, Ap
                     _ => crate::windows::position::PopupPosition::Below,
                 };
                 // 窗口创建在异步运行时线程完成（避免 Windows WebView2 死锁），定位随创建回调执行
-                manager::show_panel(&app, selection.anchor, pref);
+                manager::show_panel(app, selection.anchor, pref);
             }
         }
-        "settings" => open_settings(app, state),
+        "settings" => manager::show_window(app, "settings", WindowKind::Settings, "settings.html"),
         _ => {}
     }
 }

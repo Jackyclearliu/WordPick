@@ -5,6 +5,7 @@
 //! 在**同步 command / 事件回调线程**上创建窗口会与 WebView2 死锁（进程挂起后以
 //! 0xCFFFFFFF / STATUS_APPLICATION_HANG 退出）。因此本模块所有创建路径都投递到
 //! Tauri 异步运行时线程执行；调用方（托盘菜单、快捷键回调、分发线程）一律不阻塞。
+use once_cell::sync::Lazy;
 use tauri::{Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 use super::position::{locate, PopupPosition, Rect};
@@ -25,6 +26,7 @@ fn build_window(
             .transparent(true)
             .skip_taskbar(true)
             .focused(false) // 不抢占焦点（FR-2.2）
+            .visible(false) // 构建即隐藏：定位完成前不可见，消灭位置闪现
             .resizable(false)
             .shadow(false)
             .inner_size(280.0, 44.0),
@@ -33,6 +35,7 @@ fn build_window(
             .transparent(true)
             .skip_taskbar(true)
             .focused(true)
+            .visible(false) // 构建即隐藏：定位完成前不可见，消灭位置闪现
             .resizable(true)
             .inner_size(420.0, 540.0),
         WindowKind::Settings => WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
@@ -93,12 +96,13 @@ pub fn show_window(app: &tauri::AppHandle, label: &str, kind: WindowKind, url: &
 }
 
 /// 把窗口定位到锚点旁（FR-3.1：选区下方/右侧可配置，空间不足自动翻转）
+/// 返回最终窗口左上角（物理像素），调用方用于记录热区/后续逻辑
 pub fn position_at(
     app: &tauri::AppHandle,
     win: &WebviewWindow,
     anchor: (i32, i32),
     pref: PopupPosition,
-) {
+) -> (i32, i32) {
     // 工作区：优先取包含锚点的显示器，退回主显示器（多显示器由 Tauri 统一处理）
     let workarea = app
         .monitor_from_point(anchor.0 as f64, anchor.1 as f64)
@@ -130,7 +134,14 @@ pub fn position_at(
     // 锚点（GetCursorPos/GetGUIThreadInfo）与工作区均为物理像素，直接置位；
     // 再除 scale 会把高 DPI 屏上的窗口向原点拉（「跑到左上角」 bug）
     let _ = win.set_position(PhysicalPosition::new(x, y));
+    (x, y)
 }
+
+/// 工具条热区（物理像素）：键盘钩子据此判断「光标在工具条内」才接管 1/2/3/Esc
+/// （FR-2.4）；隐藏时置 None，钩子随之失效
+pub type ToolbarRect = (i32, i32, i32, i32);
+pub static TOOLBAR_RECT: Lazy<parking_lot::Mutex<Option<ToolbarRect>>> =
+    Lazy::new(|| parking_lot::Mutex::new(None));
 
 fn place_toolbar(
     app: &tauri::AppHandle,
@@ -140,9 +151,15 @@ fn place_toolbar(
 ) {
     // 先隐藏再移动：复用窗口时位置跳转会以闪现暴露，隐藏-定位-显示保证只呈现最终位置
     let _ = win.hide();
-    position_at(app, win, anchor, pref);
+    let (x, y) = position_at(app, win, anchor, pref);
+    let size = win
+        .inner_size()
+        .unwrap_or(tauri::PhysicalSize::new(280, 44));
+    *TOOLBAR_RECT.lock() = Some((x, y, size.width as i32, size.height as i32));
     let _ = win.show();
-    let _ = win.set_focus(); // 无焦点工具条需要一次焦点以接收键盘操作（FR-2.4），随后不抢占输入
+    // 注意：这里**不能** set_focus——焦点被工具条持有会吞掉目标应用的一切按键
+    // （Ctrl+C/Delete/输入全部失效）。键盘操作（1/2/3/Esc）由低层键盘钩子在
+    // 「光标位于工具条热区内」时接管，见 selection::uia::start（FR-2.4）。
 }
 
 /// 在选区锚点处显示工具条（含定位算法与工作区约束，FR-1.1）
@@ -201,12 +218,13 @@ pub fn show_panel(app: &tauri::AppHandle, anchor: Option<(i32, i32)>, pref: Popu
     }
 }
 
-/// 隐藏工具条（选区取消，FR-1.2）
+/// 隐藏工具条（选区取消，FR-1.2）；同时清除热区，键盘钩子不再接管 1/2/3/Esc
 pub fn hide_toolbar<M, R>(app: &M)
 where
     M: Manager<R>,
     R: tauri::Runtime,
 {
+    *TOOLBAR_RECT.lock() = None;
     if let Some(win) = app.get_webview_window("toolbar") {
         let _ = win.hide();
     }
