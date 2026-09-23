@@ -51,6 +51,8 @@ const bodyEl = ref<HTMLElement | null>(null)
 const followup = ref('')
 const followupLimitHint = ref(false)
 const pinned = ref(false)
+/** 首轮翻译/解释只发起一次（重入会重复请求、渲染器叠加输出） */
+let firstRoundStarted = false
 
 const scenarioMeta: Record<Scenario, { title: string; barClass: string }> = {
   translate: { title: '翻译', barClass: 'bg-sky-500' },
@@ -80,6 +82,8 @@ function newRenderer(s: PanelSession) {
 
 /** 在途请求登记表：区分「展示流」与「摘要流」，互不干扰 */
 const inflight = new Map<string, { kind: 'display' | 'summary'; buffer: string }>()
+/** 当前展示流请求 id：过期/并发展示的 chunk 一律丢弃，防止渲染器叠加重复 */
+let activeDisplayId: string | null = null
 
 async function runRequest(msgs: ChatMessage[], scenario: Scenario, kind: 'display' | 'summary') {
   const s = session.value
@@ -88,6 +92,7 @@ async function runRequest(msgs: ChatMessage[], scenario: Scenario, kind: 'displa
   const request_id = newRequestId()
   inflight.set(request_id, { kind, buffer: '' })
   if (kind === 'display') {
+    activeDisplayId = request_id
     s.status = 'streaming'
     s.error = null
   }
@@ -114,6 +119,8 @@ async function startFirstRound() {
   const ctx = context.value
   const cfg = config.value
   if (!ctx || !cfg) return
+  if (firstRoundStarted) return // 防止重入导致同一译文发起两次请求
+  firstRoundStarted = true
   if (ctx.scenario === 'explain') void initHighlighter()
   const detected = detectLang(ctx.selection.text)
   const target = defaultTarget(detected)
@@ -141,6 +148,11 @@ function handleChatEvent(e: ChatEvent) {
   const s = session.value
   const req = inflight.get(e.request_id)
   if (!s || !req) return
+  // 展示流只认当前活跃请求：过期请求的 done/error 也要清登记表，chunk 直接丢
+  if (req.kind === 'display' && e.request_id !== activeDisplayId) {
+    if (e.type !== 'chunk') inflight.delete(e.request_id)
+    return
+  }
 
   if (e.type === 'chunk') {
     if (req.kind === 'display') {

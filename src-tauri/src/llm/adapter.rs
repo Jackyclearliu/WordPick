@@ -147,19 +147,24 @@ fn emit_chat(app: &tauri::AppHandle, event: ChatEvent) {
 /// 发起流式对话：SSE chunk 逐条 emit；结束时发 Done/Error
 pub async fn chat_stream(app: tauri::AppHandle, req: ChatRequest) {
     log::info!(
-        "chat_stream start: provider={} model={} scenario={:?} request_id={} messages={}",
+        "chat_stream start: provider={} model={} scenario={:?} request_id={} messages={} user_text={:?}",
         req.provider.name,
         req.model,
         req.scenario,
         req.request_id,
-        req.messages.len()
+        req.messages.len(),
+        req.messages
+            .iter()
+            .find(|m| m.role == "user")
+            .map(|m| &m.content[..m.content.len().min(120)])
     );
     let flag = Arc::new(AtomicBool::new(false));
     STOP_FLAGS
         .lock()
         .insert(req.request_id.clone(), flag.clone());
+    let streamed = Arc::new(AtomicBool::new(false));
 
-    let result = run_with_retry(&app, &req, &flag).await;
+    let result = run_with_retry(&app, &req, &flag, &streamed).await;
     let _ = STOP_FLAGS.lock().remove(&req.request_id);
 
     match &result {
@@ -189,10 +194,11 @@ async fn run_with_retry(
     app: &tauri::AppHandle,
     req: &ChatRequest,
     flag: &AtomicBool,
+    streamed: &AtomicBool,
 ) -> Result<(), (ErrorKind, String)> {
     let mut attempt = 0;
     loop {
-        match run_once(app, req, flag).await {
+        match run_once(app, req, flag, streamed).await {
             Ok(()) => return Ok(()),
             Err(
                 e @ (ErrorKind::RateLimited, _)
@@ -200,6 +206,15 @@ async fn run_with_retry(
                 | e @ (ErrorKind::BadRequest, _),
             ) => {
                 return Err(e); // 不重试：限流 / Key 无效 / 请求错误直接反馈
+            }
+            Err(e) if streamed.load(Ordering::SeqCst) => {
+                // 流已开始再重试会把全文重发一遍，前端渲染器叠加导致整段重复（NFR 4.3：
+                // 流式中断保留已输出内容）。直接报错保留已有输出，交给用户重试。
+                log::warn!(
+                    "chat stream interrupted after output started, no retry: {:?}",
+                    e.0
+                );
+                return Err(e);
             }
             Err(e) if attempt < MAX_RETRIES => {
                 attempt += 1;
@@ -218,6 +233,7 @@ async fn run_once(
     app: &tauri::AppHandle,
     req: &ChatRequest,
     flag: &AtomicBool,
+    streamed: &AtomicBool,
 ) -> Result<(), (ErrorKind, String)> {
     let key = resolve_api_key(&req.provider).map_err(|k| {
         log::warn!(
@@ -322,6 +338,7 @@ async fn run_once(
                         .and_then(|c| c.delta.content.clone())
                         .filter(|d| !d.is_empty())
                     {
+                        streamed.store(true, Ordering::SeqCst);
                         emit_chat(
                             app,
                             ChatEvent::Chunk {

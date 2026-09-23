@@ -39,7 +39,12 @@ fn handle_probe(tx: &Sender<SelectionEvent>, sel: Option<Selection>) {
     let mut st = state.lock();
     match sel {
         Some(s) => {
-            if st.last_text.as_deref() != Some(s.text.as_str()) {
+            // 比较忽略首尾空白：WM_COPY 与模拟 Ctrl+C 两路探测返回的文本可能差一个换行
+            let same = st
+                .last_text
+                .as_deref()
+                .is_some_and(|t| t.trim() == s.text.trim());
+            if !same {
                 st.last_text = Some(s.text.clone());
                 let _ = tx.send(SelectionEvent::Selected(s));
             }
@@ -102,6 +107,12 @@ unsafe extern "system" fn on_selection_changed(
     _dwmseventtime: u32,
 ) {
     let Some((tx, app)) = CTX.get() else { return };
+    // WebView2 等自家窗口也会触发选区变更事件：忽略本进程窗口，避免自我探测
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid == std::process::id() {
+        return;
+    }
     let sel = read_selection(app, hwnd);
     handle_probe(tx, sel);
 }
@@ -145,6 +156,12 @@ fn poll_loop() {
         let dragged = held.elapsed() >= DRAG_MIN_HOLD
             && (pos.0 - down_pos.0).abs() + (pos.1 - down_pos.1).abs() > DRAG_MIN_MOVE;
         if !dragged {
+            // 单击（非拖选）：点选会把 caret 移到点击处、选区随即消失。
+            // 点击自家工具条/面板时 fg=None（前台是本进程）不受影响——修复
+            // 「同一应用内点别处取消选区后工具条残留」的场景。
+            if fg.is_some() {
+                handle_probe(tx, None);
+            }
             continue;
         }
         let Some(target) = fg else { continue };
