@@ -1,0 +1,23 @@
+@import 'tailwindcss';
+
+/* WordPick 全局样式：三个窗口共用 */
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  /* 透明窗口下禁止默认白底透出 */
+  background: transparent;
+  overflow: hidden;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  user-select: none;
+}
+
+/* 正文区域恢复可选中（FR-5：译文/解释需要复制） */
+.selectable,
+.selectable * {
+  user-select: text;
+}

@@ -1,0 +1,54 @@
+// WordPick 用户配置（首次运行自动生成，全部可缺省——缺省值即内置默认）
+// 读取优先级：环境变量 > 本配置文件 > 仓库内置默认（config/default.toml）
+
+[general]
+# 触发模式：auto（自动监听选区）/ shortcut（全局快捷键唤起）
+trigger_mode = "auto"
+# 弹窗位置：below（选区下方）/ top-right（右上方）
+popup_position = "below"
+# 划词长度上限（字符），超长不弹出工具条
+max_selection_chars = 5000
+# 应用黑名单（进程名/应用名），命中不弹出
+blacklist_apps = []
+# 主题：system / light / dark
+theme = "system"
+# 全局快捷键
+shortcut_toggle = "Alt+Q"
+shortcut_settings = "Alt+,"
+
+# 提供方：任意 OpenAI 兼容服务均可接入（base_url + api_key + model）
+# api_key 支持明文（本地自用）与环境变量占位符（如 "${DEEPSEEK_API_KEY}"）
+[[providers]]
+name = "deepseek"
+base_url = "https://api.deepseek.com/v1"
+api_key = "${DEEPSEEK_API_KEY}"
+default_model = "deepseek-v4-flash"
+
+[[providers]]
+name = "moonshot"
+base_url = "https://api.moonshot.cn/v1"
+api_key = "${MOONSHOT_API_KEY}"
+default_model = "kimi-k2.6"
+
+[[providers]]
+name = "qwen"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key = "${DASHSCOPE_API_KEY}"
+default_model = "qwen3.7-flash"
+
+[[providers]]
+name = "openai"
+base_url = "https://api.openai.com/v1"
+api_key = "${OPENAI_API_KEY}"
+default_model = "gpt-5.6-sol"
+
+# 场景化模型选择：按 能力 / 速度 / 价格 三角权衡（详见需求文档 §5.5）
+[scenario_models]
+translate = { provider = "deepseek", model = "deepseek-v4-flash" }
+explain = { provider = "deepseek", model = "deepseek-v4-pro" }
+chat = { provider = "deepseek", model = "deepseek-v4-pro" }
+
+# 追问轮数上限：超过后提示开新会话（默认 10）
+[limits]
+max_followup_rounds = 10
+max_tokens_translate = 2048
