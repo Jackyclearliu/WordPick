@@ -25,6 +25,34 @@ use super::{Selection, SelectionEvent, SelectionSource};
 static CTX: OnceLock<(Sender<SelectionEvent>, tauri::AppHandle)> = OnceLock::new();
 static HOOK: OnceLock<isize> = OnceLock::new();
 
+/// 两路探测（WinEvent / 拖选释放）共享的选区状态：按文本去重，避免重复上报
+struct ProbeState {
+    last_text: Option<String>,
+    /// 最近一次「外部应用」前台窗口（自家工具条/面板抢焦点时忽略，见 poll_loop）
+    last_foreign_hwnd: Option<isize>,
+}
+static STATE: OnceLock<parking_lot::Mutex<ProbeState>> = OnceLock::new();
+
+/// 统一上报：有变化才发事件（Selected 按文本去重；Cleared 仅在确有选区时发一次）
+fn handle_probe(tx: &Sender<SelectionEvent>, sel: Option<Selection>) {
+    let Some(state) = STATE.get() else { return };
+    let mut st = state.lock();
+    match sel {
+        Some(s) => {
+            if st.last_text.as_deref() != Some(s.text.as_str()) {
+                st.last_text = Some(s.text.clone());
+                let _ = tx.send(SelectionEvent::Selected(s));
+            }
+        }
+        None => {
+            if st.last_text.is_some() {
+                st.last_text = None;
+                let _ = tx.send(SelectionEvent::Cleared);
+            }
+        }
+    }
+}
+
 /// 轮询周期：检测鼠标释放与前台切换（轻量，不触碰剪贴板）
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// 拖选判定：左键按住 ≥180ms 且位移 >6px（区分点按与拖选）
@@ -36,6 +64,10 @@ pub fn start(tx: Sender<SelectionEvent>, app: tauri::AppHandle) {
     if CTX.set((tx, app)).is_err() {
         return;
     }
+    let _ = STATE.set(parking_lot::Mutex::new(ProbeState {
+        last_text: None,
+        last_foreign_hwnd: None,
+    }));
     std::thread::spawn(|| unsafe {
         let hook: HWINEVENTHOOK = SetWinEventHook(
             EVENT_OBJECT_TEXTSELECTIONCHANGED,
@@ -70,16 +102,13 @@ unsafe extern "system" fn on_selection_changed(
     _dwmseventtime: u32,
 ) {
     let Some((tx, app)) = CTX.get() else { return };
-    let Some(sel) = read_selection(app, hwnd) else {
-        return;
-    };
-    let _ = tx.send(SelectionEvent::Selected(sel));
+    let sel = read_selection(app, hwnd);
+    handle_probe(tx, sel);
 }
 
 /// 鼠标拖选轮询：左键「按住→位移→松开」即对前台应用做模拟 Ctrl+C 探测。
 /// 前台切换离开选区窗口时上报 Cleared（工具条随选区消失而隐藏，FR-1.2）。
 fn poll_loop() {
-    let mut last_fg: Option<isize> = None;
     let mut down_since: Option<Instant> = None;
     let mut down_pos = (0i32, 0i32);
     loop {
@@ -87,12 +116,18 @@ fn poll_loop() {
         let Some((tx, app)) = CTX.get() else { continue };
         let fg = foreground_hwnd();
 
-        // 前台变化：离开选区所在窗口（或切到 WordPick 自身）→ 清选区
-        if fg.map(|h| h.0 as isize) != last_fg {
-            if last_fg.is_some() {
-                let _ = tx.send(SelectionEvent::Cleared);
+        // 仅当外部前台真实切换时才清选区；fg=None（自家窗口/无前台）保持状态
+        if let Some(hwnd) = fg {
+            let Some(state) = STATE.get() else { continue };
+            let mut st = state.lock();
+            if st.last_foreign_hwnd != Some(hwnd.0 as isize) {
+                st.last_foreign_hwnd = Some(hwnd.0 as isize);
+                if st.last_text.is_some() {
+                    st.last_text = None;
+                    drop(st);
+                    let _ = tx.send(SelectionEvent::Cleared);
+                }
             }
-            last_fg = fg.map(|h| h.0 as isize);
         }
 
         // 鼠标左键状态跟踪
@@ -113,12 +148,8 @@ fn poll_loop() {
             continue;
         }
         let Some(target) = fg else { continue };
-        if let Some(sel) = read_selection_via_ctrl_c(app, target) {
-            let _ = tx.send(SelectionEvent::Selected(sel));
-        } else {
-            // 拖选后取不到文本（应用不支持复制/无实际选区）→ 视为选区已清
-            let _ = tx.send(SelectionEvent::Cleared);
-        }
+        let sel = read_selection_via_ctrl_c(app, target);
+        handle_probe(tx, sel);
     }
 }
 
