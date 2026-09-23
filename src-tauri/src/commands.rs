@@ -26,64 +26,13 @@ pub fn toolbar_action(action: String, app: tauri::AppHandle, state: State<'_, Ap
                     "top-right" => crate::windows::position::PopupPosition::TopRight,
                     _ => crate::windows::position::PopupPosition::Below,
                 };
-                manager::show_window(&app, "panel", WindowKind::Panel, "panel.html");
-                place_panel_near_selection(&app, selection.anchor, pref);
+                // 窗口创建在异步运行时线程完成（避免 Windows WebView2 死锁），定位随创建回调执行
+                manager::show_panel(&app, selection.anchor, pref);
             }
         }
         "settings" => open_settings(app, state),
         _ => {}
     }
-}
-
-/// 将对话框定位到选区旁（FR-3.1：选区下方/右侧可配置，空间不足自动翻转）
-pub fn place_panel_near_selection(
-    app: &tauri::AppHandle,
-    anchor: Option<(i32, i32)>,
-    pref: crate::windows::position::PopupPosition,
-) {
-    use crate::windows::position::locate;
-    use tauri::PhysicalPosition;
-    let Some(anchor) = anchor else { return };
-    let Some(win) = app.get_webview_window("panel") else {
-        return;
-    };
-    let (workarea, scale) = app
-        .monitor_from_point(anchor.0 as f64, anchor.1 as f64)
-        .ok()
-        .flatten()
-        .map(|m| {
-            (
-                crate::windows::position::Rect {
-                    x: m.position().x,
-                    y: m.position().y,
-                    w: m.size().width as i32,
-                    h: m.size().height as i32,
-                },
-                m.scale_factor(),
-            )
-        })
-        .unwrap_or((
-            crate::windows::position::Rect {
-                x: 0,
-                y: 0,
-                w: 1920,
-                h: 1080,
-            },
-            1.0,
-        ));
-    let size = win
-        .inner_size()
-        .unwrap_or(tauri::PhysicalSize::new(420, 540));
-    let (x, y) = locate(
-        anchor,
-        (size.width as i32, size.height as i32),
-        workarea,
-        pref,
-    );
-    let _ = win.set_position(PhysicalPosition::new(
-        (x as f64 / scale) as i32,
-        (y as f64 / scale) as i32,
-    ));
 }
 
 /// 面板 on mount 时取走上下文

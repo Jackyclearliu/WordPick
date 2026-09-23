@@ -16,8 +16,9 @@ use state::AppState;
 use tauri::Manager;
 use windows::position::PopupPosition;
 
-/// 选区事件防抖窗口：拖选期间事件高频触发，安静 220ms 后才弹出工具条（FR-1.1 ≤300ms）
-const DEBOUNCE: Duration = Duration::from_millis(220);
+/// 选区事件防抖窗口：拖选期间事件高频触发，安静 180ms 后才弹出工具条
+/// （轮询探测 120ms + 防抖 180ms ≈ 300ms 内弹出，满足 FR-1.1 ≤300ms）
+const DEBOUNCE: Duration = Duration::from_millis(180);
 
 /// 统一事件分发器：过滤（长度/黑名单）→ 防抖 → 工具条显示/隐藏
 fn spawn_dispatcher(
@@ -202,6 +203,22 @@ pub fn run() {
             // 系统托盘（FR-7.5）
             if let Err(e) = tray::setup_tray(app.handle()) {
                 log::warn!("托盘初始化失败（无图标环境可忽略）: {e}");
+            }
+
+            // 首次运行（无任何可用 Key）：主动弹出设置页引导（FR-6.4 Onboarding）
+            let has_key = config.providers.iter().any(|p| {
+                crate::secure::read_key(&p.name)
+                    .map(|k| !k.is_empty())
+                    .unwrap_or(false)
+                    || !crate::config::resolve_env_placeholder(&p.api_key).is_empty()
+            });
+            if !has_key {
+                windows::manager::show_window(
+                    app.handle(),
+                    "settings",
+                    windows::WindowKind::Settings,
+                    "settings.html",
+                );
             }
 
             // 事件通道 + 分发器
