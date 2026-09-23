@@ -91,14 +91,23 @@ async function runRequest(msgs: ChatMessage[], scenario: Scenario, kind: 'displa
     s.status = 'streaming'
     s.error = null
   }
-  await startChat({
-    request_id,
-    provider: target.provider,
-    model: target.model,
-    scenario,
-    messages: msgs,
-    max_tokens: scenario === 'translate' ? config.value?.limits.max_tokens_translate : undefined,
-  })
+  try {
+    await startChat({
+      request_id,
+      provider: target.provider,
+      model: target.model,
+      scenario,
+      messages: msgs,
+      max_tokens: scenario === 'translate' ? config.value?.limits.max_tokens_translate : undefined,
+    })
+  } catch (e) {
+    // 调用失败必须落到错误态（否则界面永远卡在「正在生成」）
+    inflight.delete(request_id)
+    if (kind === 'display') {
+      s.error = { kind: 'unknown', message: `调用失败：${String(e)}` }
+      s.status = 'error'
+    }
+  }
 }
 
 async function startFirstRound() {
@@ -209,7 +218,13 @@ async function closePanel() {
 
 async function stopStreaming() {
   for (const [id, req] of inflight) {
-    if (req.kind === 'display') await stopChat(id)
+    if (req.kind === 'display') {
+      try {
+        await stopChat(id)
+      } catch {
+        // 停止失败不阻塞本地状态流转
+      }
+    }
   }
   const s = session.value
   if (s && s.status === 'streaming') {
@@ -295,9 +310,26 @@ onMounted(async () => {
   ])
   unlisten = await onChatEvent(handleChatEvent)
   // 非钉住状态：失焦自动关闭（FR-5.1）
+  // Windows 透明窗口存在点击穿透导致的伪失焦：光标仍在对话框内时忽略
   const { listen: listenWin } = await import('@tauri-apps/api/event')
   unblur = await listenWin('tauri://blur', async () => {
-    if (!pinned.value) await closePanel()
+    if (pinned.value) return
+    try {
+      const [pos, outer, size] = await Promise.all([
+        invoke<[number, number] | null>('cursor_position'),
+        win.outerPosition(),
+        win.innerSize(),
+      ])
+      if (pos && outer && size) {
+        const [cx, cy] = pos
+        const inside =
+          cx >= outer.x && cx <= outer.x + size.width && cy >= outer.y && cy <= outer.y + size.height
+        if (inside) return
+      }
+    } catch {
+      // 取不到光标信息时按原逻辑关闭
+    }
+    await closePanel()
   })
   await startFirstRound()
 })

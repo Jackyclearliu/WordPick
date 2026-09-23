@@ -225,3 +225,9 @@ pub fn selection_cleared(app: tauri::AppHandle, state: State<'_, AppState>) {
     *state.last_selection.lock().unwrap() = None;
     hide_toolbar(app);
 }
+
+/// 当前鼠标光标屏幕坐标（物理像素；面板失焦关闭判定用，FR-5.1）
+#[tauri::command]
+pub fn cursor_position() -> Option<(i32, i32)> {
+    crate::selection::clipboard::cursor_pos()
+}

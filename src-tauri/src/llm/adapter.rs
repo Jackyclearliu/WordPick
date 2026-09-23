@@ -137,8 +137,23 @@ struct StreamDelta {
     content: Option<String>,
 }
 
+/// 发事件到 WebView；失败必须落日志（事件丢失正是「卡在正在生成」的隐形元凶）
+fn emit_chat(app: &tauri::AppHandle, event: ChatEvent) {
+    if let Err(e) = app.emit("wp://chat-chunk", event) {
+        log::error!("emit chat event failed: {e}");
+    }
+}
+
 /// 发起流式对话：SSE chunk 逐条 emit；结束时发 Done/Error
 pub async fn chat_stream(app: tauri::AppHandle, req: ChatRequest) {
+    log::info!(
+        "chat_stream start: provider={} model={} scenario={:?} request_id={} messages={}",
+        req.provider.name,
+        req.model,
+        req.scenario,
+        req.request_id,
+        req.messages.len()
+    );
     let flag = Arc::new(AtomicBool::new(false));
     STOP_FLAGS
         .lock()
@@ -147,9 +162,18 @@ pub async fn chat_stream(app: tauri::AppHandle, req: ChatRequest) {
     let result = run_with_retry(&app, &req, &flag).await;
     let _ = STOP_FLAGS.lock().remove(&req.request_id);
 
+    match &result {
+        Ok(()) => log::info!("chat_stream done: request_id={}", req.request_id),
+        Err((kind, message)) => log::warn!(
+            "chat_stream error: request_id={} kind={:?} message={message}",
+            req.request_id,
+            kind
+        ),
+    }
+
     if let Err((kind, message)) = result {
-        let _ = app.emit(
-            "wp://chat-chunk",
+        emit_chat(
+            &app,
             ChatEvent::Error {
                 request_id: req.request_id,
                 kind,
@@ -195,7 +219,14 @@ async fn run_once(
     req: &ChatRequest,
     flag: &AtomicBool,
 ) -> Result<(), (ErrorKind, String)> {
-    let key = resolve_api_key(&req.provider).map_err(|k| (k, "API Key 未配置或无效".into()))?;
+    let key = resolve_api_key(&req.provider).map_err(|k| {
+        log::warn!(
+            "resolve_api_key failed: provider={} kind={:?}",
+            req.provider.name,
+            k
+        );
+        (k, "API Key 未配置或无效".into())
+    })?;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
@@ -231,6 +262,7 @@ async fn run_once(
             }
         })?;
 
+    log::info!("chat HTTP {}: request_id={}", resp.status(), req.request_id);
     match resp.status() {
         StatusCode::OK => {}
         StatusCode::TOO_MANY_REQUESTS => {
@@ -274,8 +306,8 @@ async fn run_once(
                 };
                 let data = data.trim();
                 if data == "[DONE]" {
-                    let _ = app.emit(
-                        "wp://chat-chunk",
+                    emit_chat(
+                        app,
                         ChatEvent::Done {
                             request_id: req.request_id.clone(),
                             usage: None,
@@ -290,8 +322,8 @@ async fn run_once(
                         .and_then(|c| c.delta.content.clone())
                         .filter(|d| !d.is_empty())
                     {
-                        let _ = app.emit(
-                            "wp://chat-chunk",
+                        emit_chat(
+                            app,
                             ChatEvent::Chunk {
                                 request_id: req.request_id.clone(),
                                 delta,
@@ -302,8 +334,8 @@ async fn run_once(
             }
         }
     }
-    let _ = app.emit(
-        "wp://chat-chunk",
+    emit_chat(
+        app,
         ChatEvent::Done {
             request_id: req.request_id.clone(),
             usage: None,

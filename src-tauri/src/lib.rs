@@ -242,6 +242,7 @@ pub fn run() {
             commands::open_settings,
             commands::get_config,
             commands::selection_cleared,
+            commands::cursor_position,
             commands::start_chat,
             commands::stop_chat,
             commands::test_connection,
