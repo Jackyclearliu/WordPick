@@ -12,21 +12,22 @@ use super::position::{locate, PopupPosition, Rect};
 use super::WindowKind;
 
 /// 纯窗口创建（调用方必须保证不在同步 command / 事件回调线程上）
-/// `pos`：创建即定位。窗口先出现在默认位置 (0,0) 再移动会造成左上角闪现。
+/// 创建即定位到屏幕外：Tauri v2 在 Windows 上「创建时 visible(false) 的窗口
+/// 后续 show() 可能不渲染」（WebView2 合成器坑），屏幕外创建则既不可见又可靠。
 fn build_window(
     app: &tauri::AppHandle,
     label: &str,
     kind: WindowKind,
     url: &str,
-    pos: Option<PhysicalPosition<i32>>,
 ) -> tauri::Result<WebviewWindow> {
+    const OFFSCREEN: f64 = -32000.0;
     let builder = match kind {
         WindowKind::Toolbar => WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
             .decorations(false)
             .transparent(true)
             .skip_taskbar(true)
             .focused(false) // 不抢占焦点（FR-2.2）
-            .visible(false) // 构建即隐藏：定位完成前不可见，消灭位置闪现
+            .position(OFFSCREEN, OFFSCREEN)
             .resizable(false)
             .shadow(false)
             .inner_size(280.0, 44.0),
@@ -35,18 +36,12 @@ fn build_window(
             .transparent(true)
             .skip_taskbar(true)
             .focused(true)
-            .visible(false) // 构建即隐藏：定位完成前不可见，消灭位置闪现
+            .position(OFFSCREEN, OFFSCREEN)
             .resizable(true)
             .inner_size(420.0, 540.0),
         WindowKind::Settings => WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
             .decorations(true)
             .inner_size(760.0, 600.0),
-    };
-    let builder = match pos {
-        // 构建即定位，避免窗口先落在默认位置 (0,0) 造成左上角闪现；
-        // 此处单位与 place_* 的 PhysicalPosition 修正会随后覆盖（仅消除首帧闪现）
-        Some(p) => builder.position(p.x as f64, p.y as f64),
-        None => builder,
     };
     builder.build()
 }
@@ -60,7 +55,6 @@ pub fn with_window<F>(
     label: &str,
     kind: WindowKind,
     url: &str,
-    pos: Option<PhysicalPosition<i32>>,
     on_created: F,
 ) -> Option<WebviewWindow>
 where
@@ -73,7 +67,7 @@ where
     let label = label.to_string();
     let url = url.to_string();
     tauri::async_runtime::spawn(async move {
-        match build_window(&app, &label, kind, &url, pos) {
+        match build_window(&app, &label, kind, &url) {
             Ok(win) => on_created(&win),
             Err(e) => log::error!("create window '{label}' failed: {e}"),
         }
@@ -89,7 +83,7 @@ pub fn show_window(app: &tauri::AppHandle, label: &str, kind: WindowKind, url: &
             let _ = win.set_focus();
         }
     }
-    let created = with_window(app, label, kind, url, None, move |w| show(w, kind));
+    let created = with_window(app, label, kind, url, move |w| show(w, kind));
     if let Some(win) = created {
         show(&win, kind);
     }
@@ -149,14 +143,16 @@ fn place_toolbar(
     anchor: (i32, i32),
     pref: PopupPosition,
 ) {
-    // 先隐藏再移动：复用窗口时位置跳转会以闪现暴露，隐藏-定位-显示保证只呈现最终位置
+    // 先隐藏再移动：任何位置跳变都不暴露，只呈现最终位置
     let _ = win.hide();
     let (x, y) = position_at(app, win, anchor, pref);
     let size = win
         .inner_size()
         .unwrap_or(tauri::PhysicalSize::new(280, 44));
     *TOOLBAR_RECT.lock() = Some((x, y, size.width as i32, size.height as i32));
-    let _ = win.show();
+    if let Err(e) = win.show() {
+        log::warn!("toolbar show failed: {e}");
+    }
     // 注意：这里**不能** set_focus——焦点被工具条持有会吞掉目标应用的一切按键
     // （Ctrl+C/Delete/输入全部失效）。键盘操作（1/2/3/Esc）由低层键盘钩子在
     // 「光标位于工具条热区内」时接管，见 selection::uia::start（FR-2.4）。
@@ -168,13 +164,11 @@ pub fn show_toolbar_at(app: &tauri::AppHandle, anchor: Option<(i32, i32)>, pref:
         return;
     };
     let app2 = app.clone();
-    let pos = PhysicalPosition::new(anchor.0, anchor.1);
     let created = with_window(
         app,
         "toolbar",
         WindowKind::Toolbar,
         "toolbar.html",
-        Some(pos),
         move |w| {
             place_toolbar(&app2, w, anchor, pref);
         },
@@ -190,10 +184,12 @@ fn place_panel(
     anchor: (i32, i32),
     pref: PopupPosition,
 ) {
-    // 先隐藏再移动：位置跳转会以闪现暴露，隐藏-定位-显示只呈现最终位置
+    // 先隐藏再移动：任何位置跳变都不暴露，只呈现最终位置
     let _ = win.hide();
     position_at(app, win, anchor, pref);
-    let _ = win.show();
+    if let Err(e) = win.show() {
+        log::warn!("panel show failed: {e}");
+    }
 }
 
 /// 在选区旁显示对话框（翻译/解释入口）
@@ -202,17 +198,9 @@ pub fn show_panel(app: &tauri::AppHandle, anchor: Option<(i32, i32)>, pref: Popu
         return;
     };
     let app2 = app.clone();
-    let pos = PhysicalPosition::new(anchor.0, anchor.1);
-    let created = with_window(
-        app,
-        "panel",
-        WindowKind::Panel,
-        "panel.html",
-        Some(pos),
-        move |w| {
-            place_panel(&app2, w, anchor, pref);
-        },
-    );
+    let created = with_window(app, "panel", WindowKind::Panel, "panel.html", move |w| {
+        place_panel(&app2, w, anchor, pref);
+    });
     if let Some(win) = created {
         place_panel(app, &win, anchor, pref);
     }
