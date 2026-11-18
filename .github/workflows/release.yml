@@ -30,6 +30,9 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
       - run: npm ci
         env:
           WORDPICK_SKIP_BINARY_DOWNLOAD: '1'
