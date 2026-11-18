@@ -27,7 +27,7 @@ pub fn accessibility_granted() -> bool {
 /// 当前前台应用名（应用黑名单用，FR-1.5）
 pub fn frontmost_app_name() -> Option<String> {
     use cocoa::base::{id, nil};
-    use objc::{class, msg_send};
+    use objc::{class, msg_send, sel};
     unsafe {
         let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
         if workspace == nil {
