@@ -39,6 +39,7 @@ jobs:
           releaseName: 'WordPick v__VERSION__'
           releaseDraft: true
           prerelease: false
+          uploadPlainBinary: true
 
   publish-npm:
     needs: build-tauri
