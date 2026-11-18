@@ -242,7 +242,7 @@ Rust 单元测试内嵌在 `config.rs`、`secure.rs` 和 `windows/position.rs`�
 
 ### Release 与 npm
 
-`.github/workflows/release.yml` 由 `v*` tag 触发：
+`.github/workflows/release.yml` 由 `v*` tag 或 GitHub Actions 手动触发：
 
 1. macOS latest 构建 `darwin-arm64`，macOS 13 构建 `darwin-x64`，Windows latest 构建 `win32-x64`。
 2. `tauri-apps/tauri-action` 创建草稿 GitHub Release。
