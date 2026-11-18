@@ -34,7 +34,7 @@ export const PROVIDER_TEMPLATES: Array<{
   {
     name: 'deepseek',
     base_url: 'https://api.deepseek.com/v1',
-    default_model: 'deepseek-v4-flash',
+    default_model: 'deepseek-flash',
     docs_url: 'https://platform.deepseek.com/api_keys',
     key_hint: 'platform.deepseek.com → API keys',
   },

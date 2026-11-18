@@ -10,7 +10,7 @@ pub const TEMPLATES: &[ProviderTemplate] = &[
     ProviderTemplate {
         name: "deepseek",
         base_url: "https://api.deepseek.com/v1",
-        default_model: "deepseek-v4-flash",
+        default_model: "deepseek-flash",
         docs_url: "https://platform.deepseek.com/",
     },
     ProviderTemplate {
@@ -32,3 +32,17 @@ pub const TEMPLATES: &[ProviderTemplate] = &[
         docs_url: "https://platform.openai.com/",
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deepseek_uses_current_flash_model_name() {
+        let deepseek = TEMPLATES
+            .iter()
+            .find(|provider| provider.name == "deepseek")
+            .expect("必须包含 DeepSeek 模板");
+        assert_eq!(deepseek.default_model, "deepseek-flash");
+    }
+}

@@ -392,7 +392,7 @@ onUnmounted(() => {
     </div>
 
     <!-- 正文：流式输出（FR-5.4） -->
-    <div ref="bodyEl" class="selectable flex-1 overflow-y-auto px-3 py-2 text-sm leading-relaxed text-gray-800 dark:text-gray-100">
+    <div ref="bodyEl" class="selectable flex-1 overflow-y-auto px-4 py-3 text-sm leading-7 text-gray-800 dark:text-gray-100">
       <div v-if="!renderedHtml && streaming" class="text-gray-400">正在生成…</div>
       <div v-else-if="renderedHtml" class="prose-sm" v-html="renderedHtml"></div>
     </div>
@@ -440,19 +440,58 @@ onUnmounted(() => {
 /* Tailwind v4：在 SFC 作用域样式中使用 @apply 需引入参考 */
 @reference "tailwindcss";
 
-.prose-sm :deep(pre) {
-  @apply overflow-x-auto rounded-lg bg-gray-100 p-2 text-xs dark:bg-gray-800;
-}
-.prose-sm :deep(code) {
-  @apply rounded bg-gray-100 px-1 text-[0.85em] dark:bg-gray-800;
-}
 .prose-sm :deep(p) {
-  @apply my-1.5;
+  @apply my-2.5;
+}
+.prose-sm :deep(h1) {
+  @apply mb-3 mt-5 border-b border-gray-200 pb-2 text-lg font-semibold text-gray-950 dark:border-gray-700 dark:text-white;
+}
+.prose-sm :deep(h2) {
+  @apply mb-2 mt-5 text-base font-semibold text-gray-950 dark:text-white;
+}
+.prose-sm :deep(h3) {
+  @apply mb-1.5 mt-4 text-sm font-semibold text-gray-900 dark:text-gray-50;
+}
+.prose-sm :deep(strong) {
+  @apply font-semibold text-gray-950 dark:text-white;
+}
+.prose-sm :deep(ul), .prose-sm :deep(ol) {
+  @apply my-2.5 pl-5;
 }
 .prose-sm :deep(ul) {
-  @apply my-1.5 list-disc pl-5;
+  @apply list-disc;
 }
-.prose-sm :deep(h1), .prose-sm :deep(h2), .prose-sm :deep(h3) {
-  @apply my-2 font-semibold;
+.prose-sm :deep(ol) {
+  @apply list-decimal;
+}
+.prose-sm :deep(li) {
+  @apply my-1 pl-0.5;
+}
+.prose-sm :deep(blockquote) {
+  @apply my-3 rounded-r-lg border-l-4 border-sky-300 bg-sky-50/70 px-3 py-2 text-gray-600 dark:border-sky-700 dark:bg-sky-950/30 dark:text-gray-300;
+}
+.prose-sm :deep(a) {
+  @apply text-sky-600 underline underline-offset-2 dark:text-sky-400;
+}
+.prose-sm :deep(hr) {
+  @apply my-4 border-gray-200 dark:border-gray-700;
+}
+.prose-sm :deep(table) {
+  @apply my-3 w-full border-collapse text-xs;
+}
+.prose-sm :deep(th) {
+  @apply border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-left font-semibold dark:border-gray-700 dark:bg-gray-800;
+}
+.prose-sm :deep(td) {
+  @apply border border-gray-200 px-2.5 py-1.5 align-top dark:border-gray-700;
+}
+.prose-sm :deep(code) {
+  @apply rounded bg-gray-100 px-1 py-0.5 font-mono text-[0.85em] text-gray-800 dark:bg-gray-800 dark:text-gray-100;
+}
+.prose-sm :deep(pre) {
+  @apply my-3 overflow-x-auto rounded-lg border border-gray-200 bg-gray-100 p-3 text-xs leading-relaxed dark:border-gray-700 dark:bg-gray-800;
+}
+.prose-sm :deep(pre code) {
+  @apply rounded-none bg-transparent p-0 text-inherit dark:bg-transparent;
 }
 </style>

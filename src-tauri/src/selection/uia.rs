@@ -116,8 +116,8 @@ pub fn start(tx: Sender<SelectionEvent>, app: tauri::AppHandle) {
 
 // ---------------------------------------------------------------------------
 // 工具条键盘接管（FR-2.4）：低层键盘钩子，仅当光标位于工具条热区内时吞掉
-// 1/2/3（翻译/解释/设置）与 Esc（关闭）。不抢焦点——焦点若被工具条持有会吞掉
-// 目标应用的一切按键（Ctrl+C/Delete/输入全部失效），钩子方案对其它按键零影响。
+// 1/2/3（翻译/解释/设置）与 Esc（关闭）；工具条可见时其它按键只关闭工具条并原样放行。
+// 不抢焦点——焦点若被工具条持有会吞掉目标应用的一切按键（Ctrl+C/Delete/输入全部失效）。
 // ---------------------------------------------------------------------------
 
 /// 低层键盘钩子（进程生命周期内常驻；工具条隐藏时热区为 None，钩子直通）
@@ -134,34 +134,35 @@ unsafe extern "system" fn toolbar_kb_hook(ncode: i32, wparam: WPARAM, lparam: LP
     };
     if ncode >= 0 && (wparam.0 as u32 == WM_KEYDOWN || wparam.0 as u32 == WM_SYSKEYDOWN) {
         let kb = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-        let action = match kb.vkCode {
-            VK_1 => Some("translate"),
-            VK_2 => Some("explain"),
-            VK_3 => Some("settings"),
-            VK_ESCAPE => Some("__esc__"),
-            _ => None,
-        };
-        if let Some(action) = action {
-            let in_hotzone = {
-                let rect = *crate::windows::manager::TOOLBAR_RECT.lock();
-                match (rect, clipboard::cursor_pos()) {
-                    (Some((x, y, w, h)), Some((cx, cy))) => {
-                        cx >= x && cx <= x + w && cy >= y && cy <= y + h
-                    }
-                    _ => false,
-                }
+        let rect = *crate::windows::manager::TOOLBAR_RECT.lock();
+        if let Some((x, y, w, h)) = rect {
+            let action = match kb.vkCode {
+                VK_1 => Some("translate"),
+                VK_2 => Some("explain"),
+                VK_3 => Some("settings"),
+                VK_ESCAPE => Some("__esc__"),
+                _ => None,
+            };
+            let in_hotzone = match clipboard::cursor_pos() {
+                Some((cx, cy)) => cx >= x && cx <= x + w && cy >= y && cy <= y + h,
+                None => false,
             };
             if in_hotzone {
-                if let Some((_tx, app)) = CTX.get() {
-                    if action == "__esc__" {
-                        crate::windows::manager::hide_toolbar(app);
-                    } else {
-                        use tauri::Manager;
-                        let state = app.state::<crate::state::AppState>();
-                        crate::commands::perform_toolbar_action(action, app, &state);
+                if let Some(action) = action {
+                    if let Some((_tx, app)) = CTX.get() {
+                        if action == "__esc__" {
+                            crate::windows::manager::hide_toolbar(app);
+                        } else {
+                            use tauri::Manager;
+                            let state = app.state::<crate::state::AppState>();
+                            crate::commands::perform_toolbar_action(action, app, &state);
+                        }
                     }
+                    return LRESULT(1); // 仅热区内的功能键吞掉，不再转发
                 }
-                return LRESULT(1); // 吞掉按键，不再转发
+            }
+            if let Some((_tx, app)) = CTX.get() {
+                crate::windows::manager::hide_toolbar(app);
             }
         }
     }
@@ -181,7 +182,7 @@ unsafe extern "system" fn on_selection_changed(
     // WebView2 等自家窗口也会触发选区变更事件：忽略本进程窗口，避免自我探测
     let mut pid = 0u32;
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-    if pid == std::process::id() {
+    if pid == std::process::id() || left_button_down() {
         return;
     }
     let sel = read_selection(app, hwnd);
@@ -238,7 +239,7 @@ fn poll_loop() {
             continue;
         }
         let Some(target) = fg else { continue };
-        let sel = read_selection_via_ctrl_c(app, target);
+        let sel = read_selection_after_drag(app, target);
         handle_probe(tx, sel);
     }
 }
@@ -259,17 +260,23 @@ fn foreground_hwnd() -> Option<HWND> {
     }
 }
 
-/// 鼠标左键按下状态 + 当前光标位置
-fn mouse_state() -> (bool, (i32, i32)) {
+fn left_button_down() -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
-    let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } as u16 & 0x8000 != 0;
-    (down, clipboard::cursor_pos().unwrap_or((0, 0)))
+    (unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } as u16) & 0x8000 != 0
 }
 
-/// 模拟 Ctrl+C 通道：Chromium 系应用的划词取词（用户在目标应用内拖选松开，前台即目标）
+/// 鼠标左键按下状态 + 当前光标位置
+fn mouse_state() -> (bool, (i32, i32)) {
+    (
+        left_button_down(),
+        clipboard::cursor_pos().unwrap_or((0, 0)),
+    )
+}
+
+/// 拖选释放后取词：优先只读 UIA，Chromium 等不支持的应用再模拟 Ctrl+C。
 /// ⚠️ 终端类窗口禁用：conhost 会把 Ctrl+C 中断转发给所有附着该控制台的进程
 /// （dev 模式下直接杀死本应用，exit 0xc000013a），并可能干扰用户终端内运行的程序。
-fn read_selection_via_ctrl_c(app: &tauri::AppHandle, hwnd: HWND) -> Option<Selection> {
+fn read_selection_after_drag(app: &tauri::AppHandle, hwnd: HWND) -> Option<Selection> {
     if is_console_window(hwnd) {
         // 终端（conhost/Windows Terminal 等）：禁止模拟 Ctrl+C（中断转发会杀死附着进程）；
         // UIA TextPattern 直读优先，个别终端退回 WM_COPY 哨兵（仅拖选释放瞬间一次，非高频）
@@ -285,7 +292,7 @@ fn read_selection_via_ctrl_c(app: &tauri::AppHandle, hwnd: HWND) -> Option<Selec
         }?;
         return build_selection(text, anchor_for(hwnd));
     }
-    let text = clipboard::simulate_ctrl_c_probe(app)?;
+    let text = read_selection_uia(hwnd).or_else(|| clipboard::simulate_ctrl_c_probe(app))?;
     build_selection(text, anchor_for(hwnd))
 }
 

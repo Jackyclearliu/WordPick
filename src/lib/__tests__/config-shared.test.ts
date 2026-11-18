@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { pick, resolveEnvPlaceholder } from '../config-shared'
+import { PROVIDER_TEMPLATES } from '../settings-client'
 
 describe('配置解析（Rust config.rs 的可执行规格）', () => {
   it('解析 ${ENV_VAR} 占位符', () => {
@@ -21,5 +22,10 @@ describe('配置解析（Rust config.rs 的可执行规格）', () => {
     expect(pick(undefined, 'user', 'default')).toBe('user')
     expect(pick(undefined, undefined, 'default')).toBe('default')
     expect(pick('env', 'user', 'default')).toBe('env')
+  })
+
+  it('DeepSeek 模板使用当前 Flash 模型名', () => {
+    const deepseek = PROVIDER_TEMPLATES.find((provider) => provider.name === 'deepseek')
+    expect(deepseek?.default_model).toBe('deepseek-flash')
   })
 })

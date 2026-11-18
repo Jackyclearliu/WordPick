@@ -31,11 +31,15 @@ pub fn perform_toolbar_action(action: &str, app: &tauri::AppHandle, state: &AppS
                     "top-right" => crate::windows::position::PopupPosition::TopRight,
                     _ => crate::windows::position::PopupPosition::Below,
                 };
+                manager::hide_toolbar(app);
                 // 窗口创建在异步运行时线程完成（避免 Windows WebView2 死锁），定位随创建回调执行
                 manager::show_panel(app, selection.anchor, pref);
             }
         }
-        "settings" => manager::show_window(app, "settings", WindowKind::Settings, "settings.html"),
+        "settings" => {
+            manager::hide_toolbar(app);
+            manager::show_window(app, "settings", WindowKind::Settings, "settings.html");
+        }
         _ => {}
     }
 }
@@ -49,9 +53,7 @@ pub fn take_panel_context(state: State<'_, AppState>) -> Option<PanelContext> {
 /// 隐藏工具条（Esc / 点击外部）
 #[tauri::command]
 pub fn hide_toolbar(app: tauri::AppHandle) {
-    if let Some(win) = app.get_webview_window("toolbar") {
-        let _ = win.hide();
-    }
+    manager::hide_toolbar(&app);
 }
 
 #[tauri::command]

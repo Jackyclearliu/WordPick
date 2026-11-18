@@ -3,7 +3,7 @@
  * Phase 2：翻译闭环；Phase 3：解释场景与多轮追问在此基础上扩展。
  */
 import { defineStore } from 'pinia'
-import { ref, shallowRef, type Ref } from 'vue'
+import { ref, type Ref } from 'vue'
 
 import type { ChatMessage, ErrorKind, Scenario } from '@/lib/llm-client'
 import { createIncrementalRenderer, type IncrementalRenderer } from '@/lib/markdown'
@@ -27,7 +27,7 @@ export interface PanelSession {
 }
 
 export const useSessionStore = defineStore('session', () => {
-  const session: Ref<PanelSession | null> = shallowRef(null)
+  const session: Ref<PanelSession | null> = ref(null)
 
   function begin(input: {
     selection: Selection

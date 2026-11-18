@@ -111,7 +111,13 @@ mod tests {
         let cfg = AppConfig::default();
         assert_eq!(cfg.general.trigger_mode, "auto");
         assert_eq!(cfg.general.max_selection_chars, 5000);
-        assert!(cfg.providers.iter().any(|p| p.name == "deepseek"));
+        let deepseek = cfg
+            .providers
+            .iter()
+            .find(|p| p.name == "deepseek")
+            .expect("内置配置必须包含 DeepSeek");
+        assert_eq!(deepseek.default_model, "deepseek-flash");
+        assert_eq!(cfg.scenario_models.translate.model, "deepseek-flash");
     }
 
     #[test]

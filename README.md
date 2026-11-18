@@ -16,7 +16,7 @@ Select text in any app and get a mini toolbar instantly: translate, explain, fol
 - 🌊 **流式输出**：SSE 增量渲染 + Markdown / 代码高亮（shiki）
 - 📌 **钉住对话框**：置顶并行工作，失焦自动关闭
 - 🔐 **Key 安全存储**：macOS Keychain / Windows Credential Manager，仅回显后 4 位
-- ⌨️ **快捷键兜底**：`Alt+Q` 唤起（读剪贴板）、`Alt+,` 设置；数字键 1/2/3 触发、Esc 关闭
+- ⌨️ **快捷键兜底**：`Alt+Q` 唤起（读剪贴板）、`Alt+,` 设置；数字键 1/2/3 触发，Windows 下任意键关闭工具条
 
 ## 安装 | Install
 

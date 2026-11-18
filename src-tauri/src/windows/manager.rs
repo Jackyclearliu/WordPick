@@ -12,8 +12,8 @@ use super::position::{locate, PopupPosition, Rect};
 use super::WindowKind;
 
 /// 纯窗口创建（调用方必须保证不在同步 command / 事件回调线程上）
-/// 创建即定位到屏幕外：Tauri v2 在 Windows 上「创建时 visible(false) 的窗口
-/// 后续 show() 可能不渲染」（WebView2 合成器坑），屏幕外创建则既不可见又可靠。
+/// 创建即定位到屏幕外，避免默认位置的首帧暴露。面板额外创建即隐藏，定位后才显示；
+/// 工具条不能使用 visible(false)：Tauri v2 在 Windows 上后续 show() 可能不渲染。
 fn build_window(
     app: &tauri::AppHandle,
     label: &str,
@@ -36,6 +36,7 @@ fn build_window(
             .transparent(true)
             .skip_taskbar(true)
             .focused(true)
+            .visible(false)
             .position(OFFSCREEN, OFFSCREEN)
             .resizable(true)
             .inner_size(420.0, 540.0),
@@ -264,12 +265,16 @@ fn place_panel(
     anchor: (i32, i32),
     pref: PopupPosition,
 ) {
-    // 先隐藏再移动：任何位置跳变都不暴露，只呈现最终位置
-    let _ = win.hide();
-    position_at(app, win, anchor, pref);
-    if let Err(e) = win.show() {
-        log::warn!("panel show failed: {e}");
-    }
+    let app2 = app.clone();
+    let win = win.clone();
+    let _ = app.run_on_main_thread(move || {
+        // 与工具条一样在主线程按序执行，首次创建和复用都只呈现最终位置
+        let _ = win.hide();
+        position_at(&app2, &win, anchor, pref);
+        if let Err(e) = win.show() {
+            log::warn!("panel show failed: {e}");
+        }
+    });
 }
 
 /// 在选区旁显示对话框（翻译/解释入口）

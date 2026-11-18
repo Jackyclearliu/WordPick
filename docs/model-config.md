@@ -15,12 +15,16 @@ WordPick 的模型接入以 **OpenAI 兼容协议**为基准：任意提供方�
 
 | 提供方 | Base URL | 默认模型 | Key 获取 |
 | --- | --- | --- | --- |
-| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-v4-flash` | platform.deepseek.com → API keys |
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-flash` | platform.deepseek.com → API keys |
 | Moonshot (Kimi) | `https://api.moonshot.cn/v1` | `kimi-k2.6` | platform.moonshot.cn → API Key 管理 |
 | Qwen（阿里云百炼） | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3.7-flash` | 阿里云百炼控制台 → API-KEY |
 | OpenAI | `https://api.openai.com/v1` | `gpt-5.6-sol` | platform.openai.com → API keys |
 
 > 模型价格变动频繁，以上仅为默认设计依据；工具内所有模型名与参数均由你的配置决定。
+
+## DeepSeek 思考模式
+
+DeepSeek 当前默认开启高强度思考，可能延迟最终答案的返回。WordPick 对 DeepSeek 请求显式控制：翻译关闭思考以保证低延迟；解释和追问使用 `low` 思考强度。其他 OpenAI 兼容提供方不会收到 DeepSeek 专有参数。
 
 ## API Key 的三种提供方式（优先级从高到低）
 

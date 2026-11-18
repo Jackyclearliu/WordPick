@@ -22,7 +22,7 @@ shortcut_settings = "Alt+,"
 name = "deepseek"
 base_url = "https://api.deepseek.com/v1"
 api_key = "${DEEPSEEK_API_KEY}"
-default_model = "deepseek-v4-flash"
+default_model = "deepseek-flash"
 
 [[providers]]
 name = "moonshot"
@@ -44,7 +44,7 @@ default_model = "gpt-5.6-sol"
 
 # 场景化模型选择：按 能力 / 速度 / 价格 三角权衡（详见需求文档 §5.5）
 [scenario_models]
-translate = { provider = "deepseek", model = "deepseek-v4-flash" }
+translate = { provider = "deepseek", model = "deepseek-flash" }
 explain = { provider = "deepseek", model = "deepseek-v4-pro" }
 chat = { provider = "deepseek", model = "deepseek-v4-pro" }
 

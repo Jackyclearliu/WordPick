@@ -112,6 +112,11 @@ pub fn system_prompt(scenario: Scenario, source_lang: &str, target_lang: &str) -
 }
 
 #[derive(Serialize)]
+struct ThinkingConfig {
+    r#type: &'static str,
+}
+
+#[derive(Serialize)]
 struct CompletionBody {
     model: String,
     messages: Vec<ChatMessage>,
@@ -120,6 +125,10 @@ struct CompletionBody {
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
 }
 
 #[derive(Deserialize)]
@@ -135,6 +144,37 @@ struct StreamChoice {
 #[derive(Deserialize)]
 struct StreamDelta {
     content: Option<String>,
+}
+
+#[derive(Default)]
+struct SseEventBuffer {
+    bytes: Vec<u8>,
+}
+
+impl SseEventBuffer {
+    fn push(&mut self, bytes: &[u8]) -> Vec<String> {
+        self.bytes.extend_from_slice(bytes);
+        let mut events = Vec::new();
+        while let Some((pos, delimiter_len)) = event_boundary(&self.bytes) {
+            let rest = self.bytes.split_off(pos + delimiter_len);
+            let event = std::mem::replace(&mut self.bytes, rest);
+            // 只对完整事件解码，避免网络块切断 UTF-8 多字节字符时产生替换字符
+            events.push(String::from_utf8_lossy(&event).into_owned());
+        }
+        events
+    }
+}
+
+fn event_boundary(bytes: &[u8]) -> Option<(usize, usize)> {
+    (0..bytes.len()).find_map(|i| {
+        if bytes[i..].starts_with(b"\r\n\r\n") {
+            Some((i, 4))
+        } else if bytes[i..].starts_with(b"\n\n") {
+            Some((i, 2))
+        } else {
+            None
+        }
+    })
 }
 
 /// 发事件到 WebView；失败必须落日志（事件丢失正是「卡在正在生成」的隐形元凶）
@@ -229,6 +269,21 @@ async fn run_with_retry(
     }
 }
 
+fn thinking_options(
+    provider: &ProviderConfig,
+    scenario: Scenario,
+) -> (Option<ThinkingConfig>, Option<&'static str>) {
+    let is_deepseek = provider.name.eq_ignore_ascii_case("deepseek")
+        || provider.base_url.contains("api.deepseek.com");
+    if !is_deepseek {
+        return (None, None);
+    }
+    match scenario {
+        Scenario::Translate => (Some(ThinkingConfig { r#type: "disabled" }), None),
+        _ => (Some(ThinkingConfig { r#type: "enabled" }), Some("low")),
+    }
+}
+
 async fn run_once(
     app: &tauri::AppHandle,
     req: &ChatRequest,
@@ -245,7 +300,7 @@ async fn run_once(
     })?;
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
+        .connect_timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| (ErrorKind::Network, e.to_string()))?;
 
@@ -253,6 +308,7 @@ async fn run_once(
         "{}/chat/completions",
         req.provider.base_url.trim_end_matches('/')
     );
+    let (thinking, reasoning_effort) = thinking_options(&req.provider, req.scenario);
     let body = CompletionBody {
         model: req.model.clone(),
         messages: req.messages.clone(),
@@ -262,21 +318,24 @@ async fn run_once(
             Scenario::Translate => Some(0.3),
             _ => None,
         },
+        // DeepSeek 默认高强度思考会让短翻译长时间没有 content；显式控制延迟
+        thinking,
+        reasoning_effort,
     };
 
-    let resp = client
-        .post(&url)
-        .bearer_auth(key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() || e.is_connect() {
-                (ErrorKind::Network, e.to_string())
-            } else {
-                (ErrorKind::Unknown, e.to_string())
-            }
-        })?;
+    let resp = tokio::time::timeout(
+        Duration::from_secs(60),
+        client.post(&url).bearer_auth(key).json(&body).send(),
+    )
+    .await
+    .map_err(|_| (ErrorKind::Network, "等待模型响应超时（60 秒）".into()))?
+    .map_err(|e| {
+        if e.is_timeout() || e.is_connect() {
+            (ErrorKind::Network, e.to_string())
+        } else {
+            (ErrorKind::Unknown, e.to_string())
+        }
+    })?;
 
     log::info!("chat HTTP {}: request_id={}", resp.status(), req.request_id);
     match resp.status() {
@@ -304,18 +363,19 @@ async fn run_once(
     }
 
     let mut stream = resp.bytes_stream();
-    let mut buf = String::new();
-    while let Some(chunk) = stream.next().await {
+    let mut buf = SseEventBuffer::default();
+    loop {
+        let next = tokio::time::timeout(Duration::from_secs(60), stream.next())
+            .await
+            .map_err(|_| (ErrorKind::Network, "模型超过 60 秒未返回新内容".into()))?;
+        let Some(chunk) = next else { break };
         if flag.load(Ordering::SeqCst) {
             return Ok(()); // 用户点击停止：保留已输出内容（FR-5.4）
         }
         let bytes = chunk.map_err(|e| (ErrorKind::Network, e.to_string()))?;
-        buf.push_str(&String::from_utf8_lossy(&bytes));
 
-        // SSE 按空行分包（先切出事件段再清空缓冲区，避免借用冲突）
-        while let Some(pos) = buf.find("\n\n") {
-            let rest = buf.split_off(pos + 2);
-            let event = std::mem::replace(&mut buf, rest);
+        // 网络块不等于 SSE 事件或 UTF-8 字符边界；完整事件由字节缓冲统一切分
+        for event in buf.push(&bytes) {
             for line in event.lines() {
                 let Some(data) = line.strip_prefix("data:") else {
                     continue;
@@ -350,6 +410,12 @@ async fn run_once(
                 }
             }
         }
+    }
+    if !streamed.load(Ordering::SeqCst) {
+        return Err((
+            ErrorKind::Unknown,
+            "模型流已结束，但未返回可显示内容；请查看运行日志或稍后重试".into(),
+        ));
     }
     emit_chat(
         app,
@@ -395,5 +461,59 @@ pub async fn test_connection(
             Err((ErrorKind::InvalidKey, "API Key 无效".into()))
         }
         s => Err((ErrorKind::Server, format!("服务端返回 {s}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{thinking_options, Scenario, SseEventBuffer, StreamChunk};
+    use crate::config::ProviderConfig;
+
+    fn provider(name: &str, base_url: &str) -> ProviderConfig {
+        ProviderConfig {
+            name: name.into(),
+            base_url: base_url.into(),
+            api_key: String::new(),
+            default_model: String::new(),
+        }
+    }
+
+    #[test]
+    fn deepseek_thinking_is_scoped_by_scenario_and_provider() {
+        let deepseek = provider("deepseek", "https://api.deepseek.com/v1");
+        let (thinking, effort) = thinking_options(&deepseek, Scenario::Translate);
+        assert_eq!(thinking.unwrap().r#type, "disabled");
+        assert_eq!(effort, None);
+
+        let (thinking, effort) = thinking_options(&deepseek, Scenario::Explain);
+        assert_eq!(thinking.unwrap().r#type, "enabled");
+        assert_eq!(effort, Some("low"));
+
+        let other = provider("other", "https://example.com/v1");
+        assert!(thinking_options(&other, Scenario::Explain).0.is_none());
+    }
+
+    #[test]
+    fn sse_buffer_preserves_utf8_split_across_every_byte() {
+        let payload = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"**中文** 🚀\"}}]}\r\n\r\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"\\n\\n- 第二段\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut buffer = SseEventBuffer::default();
+        let mut deltas = Vec::new();
+
+        for byte in payload.as_bytes() {
+            for event in buffer.push(&[*byte]) {
+                let data = event.strip_prefix("data:").unwrap().trim();
+                if data != "[DONE]" {
+                    let chunk: StreamChunk = serde_json::from_str(data).unwrap();
+                    deltas.push(chunk.choices[0].delta.content.clone().unwrap());
+                }
+            }
+        }
+
+        assert_eq!(deltas.concat(), "**中文** 🚀\n\n- 第二段");
+        assert!(!deltas.concat().contains('\u{fffd}'));
     }
 }

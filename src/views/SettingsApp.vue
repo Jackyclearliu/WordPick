@@ -203,7 +203,7 @@ const blacklistText = computed({
       <div v-for="p in config.providers" :key="p.name" class="mb-3 rounded-lg border border-gray-200 p-3 dark:border-gray-800">
         <div class="mb-2 flex items-center gap-2">
           <input v-model="p.name" class="w-28 rounded border border-gray-300 bg-transparent px-2 py-1 font-medium dark:border-gray-700" />
-          <input v-model="p.default_model" class="flex-1 rounded border border-gray-300 bg-transparent px-2 py-1 text-xs dark:border-gray-700" placeholder="默认模型，如 deepseek-v4-flash" />
+          <input v-model="p.default_model" class="flex-1 rounded border border-gray-300 bg-transparent px-2 py-1 text-xs dark:border-gray-700" placeholder="默认模型，如 deepseek-flash" />
           <button class="text-xs text-red-500 hover:underline" @click="removeProvider(p.name)">删除</button>
         </div>
         <input v-model="p.base_url" class="mb-2 w-full rounded border border-gray-300 bg-transparent px-2 py-1 text-xs dark:border-gray-700" placeholder="Base URL，如 https://api.deepseek.com/v1" />
