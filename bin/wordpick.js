@@ -16,7 +16,7 @@ import { platform, arch } from 'node:process'
 import { resolveBinaryName, parseArgs, pidFilePath } from './cli-utils.js'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const version = process.env.npm_package_version ?? '0.1.0'
+const version = process.env.npm_package_version ?? '1.0.0'
 
 const { command } = parseArgs(process.argv.slice(2))
 

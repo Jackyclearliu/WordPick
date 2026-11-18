@@ -149,8 +149,9 @@ fn register_shortcuts(
             if event.state != ShortcutState::Pressed {
                 return;
             }
-            // 快捷键通道：优先 UIA 直读前台选区（终端里剪贴板常是旧内容）；
-            // 无选区（如 Chromium）退回剪贴板读取（FR-1.3 shortcut 模式）
+            // 快捷键通道：Windows 优先 UIA 直读前台选区（终端里剪贴板常是旧内容）；
+            // 无选区或其他平台退回剪贴板读取（FR-1.3 shortcut 模式）
+            #[cfg(windows)]
             let sel = selection::uia::foreground_selection_text()
                 .map(|text| selection::Selection {
                     text,
@@ -158,6 +159,8 @@ fn register_shortcuts(
                     source: selection::SelectionSource::Shortcut,
                 })
                 .or_else(|| selection::clipboard::read_selection_from_clipboard(app));
+            #[cfg(not(windows))]
+            let sel = selection::clipboard::read_selection_from_clipboard(app);
             if let Some(sel) = sel {
                 let app2 = app.clone();
                 let st = app2.state::<AppState>();

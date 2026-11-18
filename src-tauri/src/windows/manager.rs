@@ -51,6 +51,7 @@ fn build_window(
     // 永不夺焦点，渲染路径保持 tauri 原生（直接 SWP_SHOWWINDOW 曾致 WebView2
     // 空白不渲染）。鼠标点击照常工作；1/2/3/Esc 由低层键盘钩子在「光标位于
     // 工具条热区内」时接管，见 selection::uia::start（FR-2.4）。
+    #[cfg(windows)]
     if kind == WindowKind::Toolbar {
         if let Ok(raw) = win.hwnd() {
             unsafe {
@@ -197,46 +198,56 @@ fn place_toolbar(
 /// HWND_TOPMOST 不受此前台锁定限制（弹层类工具的通行做法），随显示置顶、
 /// 随隐藏摘除（见 hide_toolbar），不会长期霸占最顶层。
 fn raise_no_activate(win: &WebviewWindow) {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    };
-    let Ok(raw) = win.hwnd() else { return };
-    let hwnd = HWND(raw.0);
-    unsafe {
-        if let Err(e) = SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
-        ) {
-            log::warn!("raise toolbar failed: {e}");
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        };
+        let Ok(raw) = win.hwnd() else { return };
+        let hwnd = HWND(raw.0);
+        unsafe {
+            if let Err(e) = SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+            ) {
+                log::warn!("raise toolbar failed: {e}");
+            }
         }
     }
+    #[cfg(not(windows))]
+    let _ = win;
 }
 
 /// 摘除工具条置顶（隐藏时调用；随显随置、随隐随摘）
 fn unset_topmost<R: tauri::Runtime>(win: &WebviewWindow<R>) {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        SetWindowPos, HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    };
-    let Ok(raw) = win.hwnd() else { return };
-    let hwnd = HWND(raw.0);
-    unsafe {
-        let _ = SetWindowPos(
-            hwnd,
-            HWND_NOTOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
-        );
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        };
+        let Ok(raw) = win.hwnd() else { return };
+        let hwnd = HWND(raw.0);
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_NOTOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+            );
+        }
     }
+    #[cfg(not(windows))]
+    let _ = win;
 }
 
 /// 在选区锚点处显示工具条（含定位算法与工作区约束，FR-1.1）

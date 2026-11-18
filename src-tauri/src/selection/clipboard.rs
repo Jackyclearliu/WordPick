@@ -40,8 +40,8 @@ fn platform_cursor_pos() -> Option<(i32, i32)> {
 fn platform_cursor_pos() -> Option<(i32, i32)> {
     use core_graphics::event::CGEvent;
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-    let src = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)?;
-    let event = CGEvent::new(src)?;
+    let src = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok()?;
+    let event = CGEvent::new(src).ok()?;
     let pt = event.location();
     Some((pt.x as i32, pt.y as i32))
 }

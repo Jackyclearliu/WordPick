@@ -26,15 +26,18 @@ pub fn accessibility_granted() -> bool {
 
 /// 当前前台应用名（应用黑名单用，FR-1.5）
 pub fn frontmost_app_name() -> Option<String> {
-    use cocoa::appkit::NSWorkspace;
-    use cocoa::base::nil;
-    use objc::msg_send;
+    use cocoa::base::{id, nil};
+    use objc::{class, msg_send};
     unsafe {
-        let app = NSWorkspace::sharedWorkspace(nil).frontmostApplication();
+        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if workspace == nil {
+            return None;
+        }
+        let app: id = msg_send![workspace, frontmostApplication];
         if app == nil {
             return None;
         }
-        let name: cocoa::base::id = msg_send![app, localizedName];
+        let name: id = msg_send![app, localizedName];
         if name == nil {
             return None;
         }
@@ -98,7 +101,7 @@ pub fn start(tx: Sender<SelectionEvent>) {
             }
         }
         let source = AXObserverGetRunLoopSource(observer);
-        let runloop = core_foundation::runloop::CFRunLoop::current();
+        let runloop = core_foundation::runloop::CFRunLoop::get_current();
         core_foundation::runloop::CFRunLoopAddSource(
             runloop.as_concrete_TypeRef(),
             source,

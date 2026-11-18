@@ -28,8 +28,8 @@ if (!platform || !arch) {
 
 const ext = platform === 'win32' ? '.exe' : ''
 const binaryName = `wordpick-${platform}-${arch}${ext}`
-const version = process.env.npm_package_version || '0.1.0'
-const mirror = (process.env.WORDPICK_BINARY_MIRROR || 'https://github.com/wordpick/wordpick/releases/download').replace(/\/$/, '')
+const version = process.env.npm_package_version || '1.0.0'
+const mirror = (process.env.WORDPICK_BINARY_MIRROR || 'https://github.com/Jackyclearliu/WordPick/releases/download').replace(/\/$/, '')
 const url = `${mirror}/v${version}/${binaryName}`
 const dest = join(root, 'bin', binaryName)
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "WordPick",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "identifier": "com.wordpick.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -10,6 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "withGlobalTauri": false,
     "windows": [
       {

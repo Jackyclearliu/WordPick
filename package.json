@@ -1,6 +1,6 @@
 {
   "name": "wordpick",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "极致轻量、系统级、模型可自由配置的划词助手（Tauri 2 + Vue 3）",
   "type": "module",
   "bin": {
