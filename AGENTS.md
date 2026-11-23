@@ -115,7 +115,7 @@ WordPick 是系统级划词助手：用户在其他应用中选中文本后，�
 
 1. `src-tauri/src/lib.rs` 初始化日志和 Tauri 插件，加载配置并创建共享 `AppState`。
 2. 启动时写入临时目录中的 `wordpick.pid`，建立托盘；没有可用 Key 时打开设置引导。
-3. 自动模式下，Windows 使用 UIA `TextPattern`、WinEvent 和拖选释放探测；macOS 使用 AX 通知。快捷键路径优先直读 Windows UIA 选区，失败后读取剪贴板。
+3. 自动模式下，Windows 使用 UIA `TextPattern`、WinEvent 和低层鼠标事件（拖选、双击、点击外部关闭）；macOS 使用 AX 通知。快捷键路径优先直读 Windows UIA 选区，失败后读取剪贴板。
 4. 选区事件进入统一 channel，经空白/长度/黑名单过滤和 180ms 防抖后显示工具条；清除事件隐藏工具条。
 5. `windows/manager.rs` 按需创建并复用业务窗口。`tauri.conf.json` 中的 `main` 只是 1×1、隐藏、不聚焦的宿主窗口，不是设置或面板界面。
 
@@ -265,7 +265,7 @@ postinstall 支持：
 - `src-tauri/tauri.conf.json` 当前为 `csp: null`，不能假设已有 CSP 防护；扩大 Tauri capability 或窗口权限前需确认必要性。
 - Windows 窗口创建不能在同步 command/事件回调线程直接执行，现有代码会投递到 Tauri 异步运行时，避免 WebView2 死锁。
 - 窗口定位混用系统 API 与 Tauri 物理像素；不要再次除以 DPI scale。工具条的隐藏→定位→显示→置顶需保持主线程顺序。
-- 工具条依赖 `WS_EX_NOACTIVATE` 和低层键盘钩子来避免抢焦点。仅在热区内吞掉 `1/2/3/Esc`；其他按键只隐藏可见工具条，必须继续传递给原应用。不要让工具条普通聚焦。
+- 工具条依赖 `WS_EX_NOACTIVATE` 和低层键盘钩子来避免抢焦点。仅在热区内吞掉 `1/2/3/Esc`；其他按键只隐藏可见工具条，必须继续传递给原应用。低层鼠标钩子只投递事件，UIA/剪贴板读取在接收线程执行；点击工具条外部在按下时隐藏。不要让工具条普通聚焦。
 - Windows 剪贴板探测需串行并避开非文本内容；WinEvent 高频路径只读 UIA，不写剪贴板。终端窗口禁止模拟 `Ctrl+C`，否则可能向控制台进程发送中断。
 - macOS 自动选区依赖辅助功能权限；未授权时保留快捷键降级路径。
 

@@ -67,7 +67,7 @@ fn probe_lock() -> &'static std::sync::Mutex<()> {
 #[cfg(windows)]
 pub fn simulate_ctrl_c_probe(app: &tauri::AppHandle) -> Option<String> {
     use std::sync::atomic::{AtomicU64, Ordering};
-    // 两路探测（WinEvent / 拖选轮询）可能并发进入：剪贴板「存哨兵→触发复制→读→还原」
+    // 两路探测（WinEvent / 鼠标事件）可能并发进入：剪贴板「存哨兵→触发复制→读→还原」
     // 必须串行，否则交叉写入会把哨兵或脏数据当选区文本返回
     let _probe_guard = probe_lock().lock().ok()?;
     use std::time::Duration;

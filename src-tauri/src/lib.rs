@@ -16,8 +16,8 @@ use state::AppState;
 use tauri::Manager;
 use windows::position::PopupPosition;
 
-/// 选区事件防抖窗口：拖选期间事件高频触发，安静 180ms 后才弹出工具条
-/// （轮询探测 120ms + 防抖 180ms ≈ 300ms 内弹出，满足 FR-1.1 ≤300ms）
+/// 选区事件防抖窗口：拖选期间事件高频触发，安静 180ms 后才弹出工具条。
+/// 鼠标事件直接上报，拖选/双击通常在约 300ms 内弹出（FR-1.1）。
 const DEBOUNCE: Duration = Duration::from_millis(180);
 
 /// 统一事件分发器：过滤（长度/黑名单）→ 防抖 → 工具条显示/隐藏

@@ -1,14 +1,14 @@
 //! Windows 选区通道（需求文档 §5.3）：
-//! 1) **鼠标拖选释放触发**：用户在目标应用拖选、松开左键 → 模拟 Ctrl+C 取词。
-//!    这是 Chromium 系（Chrome/Edge/VS Code/Electron）唯一可靠通道：它们不响应
-//!    WM_COPY、拖选不触发 EVENT_OBJECT_TEXTSELECTIONCHANGED、UIA 树惰性不可见；
+//! 1) **低层鼠标事件触发**：拖选松开或双击后模拟 Ctrl+C 取词；点击工具条外部
+//!    在鼠标按下时立即关闭。Chromium 系（Chrome/Edge/VS Code/Electron）不响应
+//!    WM_COPY、不触发 EVENT_OBJECT_TEXTSELECTIONCHANGED，UIA 树也可能惰性不可见；
 //! 2) SetWinEventHook 订阅 EVENT_OBJECT_TEXTSELECTIONCHANGED（记事本/Office 等
 //!    经典应用事件驱动），配合哨兵式 WM_COPY 取词；
 //! 3) GetGUIThreadInfo 取 caret/选区矩形定位（取不到以光标位置兜底）。
 //!
-//! 设计要点：不做周期性剪贴板写入（剪贴板历史工具零干扰），只在「拖选松开」与
-//! 「选区变更事件」两个时刻探测；剪贴板读后还原，非文本剪贴板（图片）跳过探测。
-use std::sync::mpsc::Sender;
+//! 设计要点：不做周期性剪贴板写入（剪贴板历史工具零干扰），只在鼠标选择完成与
+//! 「选区变更事件」时探测；非文本剪贴板（图片）跳过探测。
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -58,13 +58,99 @@ fn handle_probe(tx: &Sender<SelectionEvent>, sel: Option<Selection>) {
     }
 }
 
-/// 轮询周期：检测鼠标释放与前台切换（轻量，不触碰剪贴板）
+/// 前台切换检查周期（轻量，不触碰剪贴板）
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
-/// 拖选判定：左键按住 ≥180ms 且位移 >6px（区分点按与拖选）
-const DRAG_MIN_HOLD: Duration = Duration::from_millis(180);
 const DRAG_MIN_MOVE: i32 = 6;
+const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+const DOUBLE_CLICK_MAX_MOVE: i32 = 4;
+const DOUBLE_CLICK_PROBE_DELAY: Duration = Duration::from_millis(80);
 
-/// 启动 WinEventHook 监听线程 + 鼠标拖选轮询线程（事件经 channel 发给统一分发器）
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MouseAction {
+    Clear,
+    Probe,
+}
+
+enum MouseEvent {
+    Down { at: Instant, pos: (i32, i32) },
+    Up { at: Instant, pos: (i32, i32) },
+}
+
+#[derive(Default)]
+struct MouseState {
+    down: Option<(Instant, (i32, i32))>,
+    last_click: Option<(Instant, (i32, i32))>,
+    double_click: Option<Instant>,
+}
+
+fn point_in_toolbar(pos: (i32, i32), toolbar: Option<(i32, i32, i32, i32)>) -> bool {
+    toolbar.is_some_and(|(x, y, w, h)| pos.0 >= x && pos.0 <= x + w && pos.1 >= y && pos.1 <= y + h)
+}
+
+impl MouseState {
+    fn on_event(
+        &mut self,
+        event: MouseEvent,
+        toolbar: Option<(i32, i32, i32, i32)>,
+    ) -> Option<MouseAction> {
+        match event {
+            MouseEvent::Down { at, pos } => {
+                let double_click = self.last_click.is_some_and(|(previous, previous_pos)| {
+                    at.saturating_duration_since(previous) <= DOUBLE_CLICK_INTERVAL
+                        && (pos.0 - previous_pos.0).abs() <= DOUBLE_CLICK_MAX_MOVE
+                        && (pos.1 - previous_pos.1).abs() <= DOUBLE_CLICK_MAX_MOVE
+                });
+                self.double_click = double_click.then_some(at);
+                if double_click {
+                    self.last_click = None;
+                }
+                self.down = Some((at, pos));
+                (!point_in_toolbar(pos, toolbar) && toolbar.is_some()).then_some(MouseAction::Clear)
+            }
+            MouseEvent::Up { at, pos } => {
+                let Some((_at, down_pos)) = self.down.take() else {
+                    if point_in_toolbar(pos, toolbar) {
+                        return None;
+                    }
+                    return self.double_click.is_some().then_some(MouseAction::Clear);
+                };
+                let dragged =
+                    (pos.0 - down_pos.0).abs() + (pos.1 - down_pos.1).abs() > DRAG_MIN_MOVE;
+                if !dragged && point_in_toolbar(down_pos, toolbar) {
+                    self.double_click = None;
+                    return None;
+                }
+                if dragged {
+                    self.double_click = None;
+                    self.last_click = None;
+                    Some(MouseAction::Probe)
+                } else {
+                    if self.double_click.is_none() {
+                        self.last_click = Some((at, pos));
+                    }
+                    Some(MouseAction::Clear)
+                }
+            }
+        }
+    }
+
+    fn pending_double_click(&mut self, now: Instant, button_down: bool) -> Option<MouseAction> {
+        if button_down {
+            return None;
+        }
+        let ready = self
+            .double_click
+            .is_some_and(|at| now.saturating_duration_since(at) >= DOUBLE_CLICK_PROBE_DELAY);
+        if ready {
+            self.double_click = None;
+            Some(MouseAction::Probe)
+        } else {
+            None
+        }
+    }
+}
+
+/// 启动 WinEventHook 与低层鼠标/键盘钩子（事件经 channel 发给统一分发器）
 pub fn start(tx: Sender<SelectionEvent>, app: tauri::AppHandle) {
     if CTX.set((tx, app)).is_err() {
         return;
@@ -73,13 +159,17 @@ pub fn start(tx: Sender<SelectionEvent>, app: tauri::AppHandle) {
         last_text: None,
         last_foreign_hwnd: None,
     }));
+    let (mouse_tx, mouse_rx) = std::sync::mpsc::channel();
+    let _ = MOUSE_TX.set(mouse_tx);
     std::thread::spawn(|| unsafe {
         // 低层键盘钩子（FR-2.4 数字键）安装在本线程：LL 钩子回调经安装线程的
         // 消息队列分发，本线程有健壮的 GetMessageW 循环，回调绝不积压
         // （曾装在 poll_loop 并用 MsgWait+PeekMessage 泵消息：热循环下按键被
         // 系统丢弃，表现为「Ctrl+C/Delete/打字全灭」，直到进程退出才恢复）。
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-        use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, WH_KEYBOARD_LL};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowsHookExW, WH_KEYBOARD_LL, WH_MOUSE_LL,
+        };
         let hmod = GetModuleHandleW(None).unwrap_or_default();
         match SetWindowsHookExW(WH_KEYBOARD_LL, Some(toolbar_kb_hook), hmod, 0) {
             Ok(h) => {
@@ -89,6 +179,13 @@ pub fn start(tx: Sender<SelectionEvent>, app: tauri::AppHandle) {
             Err(e) => {
                 log::warn!("toolbar keyboard hook install failed（数字键快捷触发不可用）: {e}")
             }
+        }
+        match SetWindowsHookExW(WH_MOUSE_LL, Some(selection_mouse_hook), hmod, 0) {
+            Ok(h) => {
+                let _ = MOUSE_HOOK.set(h.0 as isize);
+                log::info!("selection mouse hook installed");
+            }
+            Err(e) => log::warn!("selection mouse hook install failed: {e}"),
         }
 
         let hook: HWINEVENTHOOK = SetWinEventHook(
@@ -110,8 +207,8 @@ pub fn start(tx: Sender<SelectionEvent>, app: tauri::AppHandle) {
             let _ = windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
         }
     });
-    std::thread::spawn(poll_loop);
-    log::info!("drag-selection poller started");
+    std::thread::spawn(move || poll_loop(mouse_rx));
+    log::info!("event-driven selection watcher started");
 }
 
 // ---------------------------------------------------------------------------
@@ -120,8 +217,10 @@ pub fn start(tx: Sender<SelectionEvent>, app: tauri::AppHandle) {
 // 不抢焦点——焦点若被工具条持有会吞掉目标应用的一切按键（Ctrl+C/Delete/输入全部失效）。
 // ---------------------------------------------------------------------------
 
-/// 低层键盘钩子（进程生命周期内常驻；工具条隐藏时热区为 None，钩子直通）
+/// 低层钩子（进程生命周期内常驻；工具条隐藏时热区为 None，键盘钩子直通）
 static KB_HOOK: OnceLock<isize> = OnceLock::new();
+static MOUSE_HOOK: OnceLock<isize> = OnceLock::new();
+static MOUSE_TX: OnceLock<Sender<MouseEvent>> = OnceLock::new();
 
 const VK_1: u32 = 0x31;
 const VK_2: u32 = 0x32;
@@ -169,6 +268,30 @@ unsafe extern "system" fn toolbar_kb_hook(ncode: i32, wparam: WPARAM, lparam: LP
     unsafe { CallNextHookEx(None, ncode, wparam, lparam) }
 }
 
+unsafe extern "system" fn selection_mouse_hook(
+    ncode: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, MSLLHOOKSTRUCT, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    };
+    if ncode >= 0 {
+        let mouse = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+        let at = Instant::now();
+        let pos = (mouse.pt.x, mouse.pt.y);
+        let event = match wparam.0 as u32 {
+            WM_LBUTTONDOWN => Some(MouseEvent::Down { at, pos }),
+            WM_LBUTTONUP => Some(MouseEvent::Up { at, pos }),
+            _ => None,
+        };
+        if let (Some(tx), Some(event)) = (MOUSE_TX.get(), event) {
+            let _ = tx.send(event);
+        }
+    }
+    unsafe { CallNextHookEx(None, ncode, wparam, lparam) }
+}
+
 unsafe extern "system" fn on_selection_changed(
     _hwineventhook: HWINEVENTHOOK,
     _event: u32,
@@ -189,19 +312,15 @@ unsafe extern "system" fn on_selection_changed(
     handle_probe(tx, sel);
 }
 
-/// 鼠标拖选轮询：左键「按住→位移→松开」即对前台应用做模拟 Ctrl+C 探测。
-/// 前台切换离开选区窗口时上报 Cleared（工具条随选区消失而隐藏，FR-1.2）。
-/// 纯 sleep 轮询即可：键盘钩子已挪到 WinEvent 线程，本线程无需泵消息。
-fn poll_loop() {
-    let mut down_since: Option<Instant> = None;
-    let mut down_pos = (0i32, 0i32);
+/// 鼠标事件驱动：拖选松开或双击后取词；点击工具条外部在按下时立即关闭。
+/// 前台切换检查仍使用轻量周期，所有 UIA/剪贴板读取都留在本线程而非钩子回调。
+fn poll_loop(mouse_rx: Receiver<MouseEvent>) {
+    let mut mouse = MouseState::default();
     loop {
-        std::thread::sleep(POLL_INTERVAL);
-
+        let event = mouse_rx.recv_timeout(POLL_INTERVAL).ok();
         let Some((tx, app)) = CTX.get() else { continue };
         let fg = foreground_hwnd();
 
-        // 仅当外部前台真实切换时才清选区；fg=None（自家窗口/无前台）保持状态
         if let Some(hwnd) = fg {
             let Some(state) = STATE.get() else { continue };
             let mut st = state.lock();
@@ -215,32 +334,43 @@ fn poll_loop() {
             }
         }
 
-        // 鼠标左键状态跟踪
-        let (down, pos) = mouse_state();
-        if down {
-            if down_since.is_none() {
-                down_since = Some(Instant::now());
-                down_pos = pos;
+        if let Some(event) = event {
+            let toolbar = *crate::windows::manager::TOOLBAR_RECT.lock();
+            if let Some(action) = mouse.on_event(event, toolbar) {
+                apply_mouse_action(action, toolbar, fg, tx, app);
             }
-            continue;
         }
-        let Some(held) = down_since.take() else {
-            continue;
-        };
-        let dragged = held.elapsed() >= DRAG_MIN_HOLD
-            && (pos.0 - down_pos.0).abs() + (pos.1 - down_pos.1).abs() > DRAG_MIN_MOVE;
-        if !dragged {
-            // 单击（非拖选）：点选会把 caret 移到点击处、选区随即消失。
-            // 点击自家工具条/面板时 fg=None（前台是本进程）不受影响——修复
-            // 「同一应用内点别处取消选区后工具条残留」的场景。
-            if fg.is_some() {
+        if let Some(action) = mouse.pending_double_click(Instant::now(), left_button_down()) {
+            apply_mouse_action(action, None, fg, tx, app);
+        }
+    }
+}
+
+fn apply_mouse_action(
+    action: MouseAction,
+    toolbar: Option<(i32, i32, i32, i32)>,
+    fg: Option<HWND>,
+    tx: &Sender<SelectionEvent>,
+    app: &tauri::AppHandle,
+) {
+    match action {
+        MouseAction::Clear => {
+            if toolbar.is_some() {
+                crate::windows::manager::hide_toolbar(app);
+                if let Some(state) = STATE.get() {
+                    state.lock().last_text = None;
+                }
+                let _ = tx.send(SelectionEvent::Cleared);
+            } else if fg.is_some() {
                 handle_probe(tx, None);
             }
-            continue;
         }
-        let Some(target) = fg else { continue };
-        let sel = read_selection_after_drag(app, target);
-        handle_probe(tx, sel);
+        MouseAction::Probe => {
+            if let Some(target) = fg {
+                let sel = read_selection_after_drag(app, target);
+                handle_probe(tx, sel);
+            }
+        }
     }
 }
 
@@ -263,14 +393,6 @@ fn foreground_hwnd() -> Option<HWND> {
 fn left_button_down() -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
     (unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } as u16) & 0x8000 != 0
-}
-
-/// 鼠标左键按下状态 + 当前光标位置
-fn mouse_state() -> (bool, (i32, i32)) {
-    (
-        left_button_down(),
-        clipboard::cursor_pos().unwrap_or((0, 0)),
-    )
 }
 
 /// 拖选释放后取词：优先只读 UIA，Chromium 等不支持的应用再模拟 Ctrl+C。
@@ -465,5 +587,114 @@ pub fn frontmost_app_name() -> Option<String> {
             return None;
         }
         Some(String::from_utf16_lossy(&buf[..len as usize]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MouseAction, MouseEvent, MouseState};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn fast_drag_still_requests_selection_probe() {
+        let now = Instant::now();
+        let mut state = MouseState::default();
+        assert_eq!(
+            state.on_event(
+                MouseEvent::Down {
+                    at: now,
+                    pos: (10, 10),
+                },
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            state.on_event(
+                MouseEvent::Up {
+                    at: now + Duration::from_millis(40),
+                    pos: (40, 10),
+                },
+                None,
+            ),
+            Some(MouseAction::Probe)
+        );
+    }
+
+    #[test]
+    fn double_click_requests_delayed_selection_probe() {
+        let now = Instant::now();
+        let mut state = MouseState::default();
+        let pos = (20, 20);
+        state.on_event(MouseEvent::Down { at: now, pos }, None);
+        assert_eq!(
+            state.on_event(
+                MouseEvent::Up {
+                    at: now + Duration::from_millis(40),
+                    pos,
+                },
+                None,
+            ),
+            Some(MouseAction::Clear)
+        );
+        state.on_event(
+            MouseEvent::Down {
+                at: now + Duration::from_millis(80),
+                pos,
+            },
+            None,
+        );
+        state.on_event(
+            MouseEvent::Up {
+                at: now + Duration::from_millis(120),
+                pos,
+            },
+            None,
+        );
+        assert_eq!(
+            state.pending_double_click(now + Duration::from_millis(159), false),
+            None
+        );
+        assert_eq!(
+            state.pending_double_click(now + Duration::from_millis(160), false),
+            Some(MouseAction::Probe)
+        );
+    }
+
+    #[test]
+    fn mouse_down_outside_toolbar_clears_immediately() {
+        let now = Instant::now();
+        let mut state = MouseState::default();
+        let toolbar = Some((100, 100, 180, 44));
+        assert_eq!(
+            state.on_event(
+                MouseEvent::Down {
+                    at: now,
+                    pos: (20, 20),
+                },
+                toolbar,
+            ),
+            Some(MouseAction::Clear)
+        );
+        assert_eq!(
+            state.on_event(
+                MouseEvent::Down {
+                    at: now,
+                    pos: (120, 120),
+                },
+                toolbar,
+            ),
+            None
+        );
+        assert_eq!(
+            state.on_event(
+                MouseEvent::Up {
+                    at: now + Duration::from_millis(40),
+                    pos: (120, 120),
+                },
+                toolbar,
+            ),
+            None
+        );
     }
 }
