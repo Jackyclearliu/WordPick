@@ -54,9 +54,11 @@ jobs:
         run: |
           version="$(node -p "require('./package.json').version")"
           if [ "$TARGET" = 'win32-x64' ]; then
-            gh release upload "v$version" 'src-tauri/target/release/wordpick.exe#wordpick-win32-x64.exe' --clobber
+            cp src-tauri/target/release/wordpick.exe wordpick-win32-x64.exe
+            gh release upload "v$version" wordpick-win32-x64.exe --clobber
           else
-            gh release upload "v$version" 'src-tauri/target/release/wordpick#wordpick-darwin-arm64' --clobber
+            cp src-tauri/target/release/wordpick wordpick-darwin-arm64
+            gh release upload "v$version" wordpick-darwin-arm64 --clobber
           fi
 
   publish-npm:
