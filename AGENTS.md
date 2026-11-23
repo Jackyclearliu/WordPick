@@ -244,8 +244,8 @@ Rust 单元测试内嵌在 `config.rs`、`secure.rs` 和 `windows/position.rs`�
 
 `.github/workflows/release.yml` 由 `v*` tag 或 GitHub Actions 手动触发：
 
-1. macOS latest 构建 `darwin-arm64`，macOS 13 构建 `darwin-x64`，Windows latest 构建 `win32-x64`。
-2. `tauri-apps/tauri-action` 创建草稿 GitHub Release。
+1. macOS latest 构建 `darwin-arm64`，Windows latest 构建 `win32-x64`；v1.0.0 不提供 macOS Intel 预编译包。
+2. `tauri-apps/tauri-action` 创建草稿 GitHub Release，随后上传与 npm 下载规则一致的原始二进制。
 3. 桌面构建完成后，`publish-npm` 使用 `NPM_TOKEN` 发布公开 npm 包。
 
 发布前同步 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 的版本号。npm `files` 仅包含 `bin`、`scripts`、`dist`、`README.md` 和 `LICENSE`；安装时 `scripts/postinstall.js` 根据 platform/arch 下载 `wordpick-<platform>-<arch>[.exe]`。

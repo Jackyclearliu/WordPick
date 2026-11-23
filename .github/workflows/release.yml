@@ -16,8 +16,6 @@ jobs:
         include:
           - os: macos-latest
             target: darwin-arm64
-          - os: macos-13
-            target: darwin-x64
           - os: windows-latest
             target: win32-x64
     steps:
@@ -48,6 +46,18 @@ jobs:
           releaseDraft: true
           prerelease: false
           uploadPlainBinary: true
+      - name: Upload npm-compatible binary
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "$TARGET" = 'win32-x64' ]; then
+            gh release upload "v$version" 'src-tauri/target/release/wordpick.exe#wordpick-win32-x64.exe' --clobber
+          else
+            gh release upload "v$version" 'src-tauri/target/release/wordpick#wordpick-darwin-arm64' --clobber
+          fi
 
   publish-npm:
     needs: build-tauri

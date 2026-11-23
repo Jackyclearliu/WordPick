@@ -156,7 +156,7 @@ api_key = "${DEEPSEEK_API_KEY}"   # 从进程环境变量解析，不保存明�
 
 ## 平台支持 | Platform Support
 
-- macOS 13+（Ventura 及以上；首次运行需授予「辅助功能」权限，未授权自动降级为快捷键模式）
+- macOS 13+ Apple Silicon（Ventura 及以上；首次运行需授予「辅助功能」权限，未授权自动降级为快捷键模式；v1.0.0 暂无 Intel 预编译包）
 - Windows 10 1809+（内置 WebView2 检测引导）
 - Linux：后续可选目标（当前仅快捷键通道）
 
